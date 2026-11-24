@@ -15,6 +15,23 @@
     const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
     return s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
   };
+  const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour12: false });
+  function dur(a) {
+    const s = Math.max(0, ((a.endedAt ? new Date(a.endedAt) : Date.now()) - new Date(a.startedAt)) / 1000);
+    return s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  }
+  const hue = (str) => [...String(str)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+  const isLive = (a) => a.status === 'running' || a.status === 'starting';
+  const avatar = (a, size = '') => `<div class="avatar ${size} ${isLive(a) ? 'live' : ''}" style="--h:${hue(a.name)}">${esc(a.name.charAt(0))}</div>`;
+  const typing = '<span class="typing"><i></i><i></i><i></i></span>';
+  const empty = (icon, html) => `<div class="empty"><b>${icon}</b>${html}</div>`;
+  // Only touch the DOM when markup really changed: keeps hover/scroll state and avoids flicker.
+  const setHtml = (el, html) => {
+    if (el._html !== html) {
+      el._html = html;
+      el.innerHTML = html;
+    }
+  };
   function md(text) {
     let out = esc(text);
     out = out.replace(/```([\s\S]*?)```/g, (_, c) => `<pre>${c.replace(/^\w*\n/, '')}</pre>`);
@@ -60,24 +77,24 @@
     const el = $('#tasks');
     $('#tasks-count').textContent = S.tasks.length || '';
     if (!S.tasks.length) {
-      el.innerHTML = '<div class="empty">No tasks yet.<br>Click “New task” to give the supervisor something to do.</div>';
+      setHtml(el, empty('✦', 'No tasks yet.<br>Click “New task” to give a supervisor something to do.'));
       return;
     }
     const roots = S.tasks.filter((t) => !t.parentId).reverse();
     const card = (t, sub) => {
       const needsApproval = t.status === 'awaiting_approval';
       const prog = taskProgress(t);
-      const planBadge = sub ? '' : t.plan ? (t.plan.approved ? '<span class="chip">plan ✓</span>' : '<span class="chip" style="color:var(--warn)">plan: needs your approval</span>') : '<span class="chip">no plan</span>';
+      const planBadge = sub ? '' : t.plan ? (t.plan.approved ? '<span class="chip">plan ✓</span>' : '<span class="chip warn">plan needs your approval</span>') : '<span class="chip">no plan</span>';
       const agents = t.agentIds.map((id) => `<span class="chip">${esc(id)}</span>`).join('');
       const working = !sub && sup(t.id).status === 'working' ? '<span class="work-dot" title="its supervisor is working"></span>' : '';
       const chatBtn = sub ? '' : `<button class="ghost small" data-chat="${t.id}">${unread[t.id] ? '● ' : ''}chat</button>`;
-      return `<div class="card ${sub ? 'sub' : ''}" data-task="${t.id}">
+      return `<div class="card task s-${t.status} ${sub ? 'sub' : ''}" data-task="${t.id}">
         <div class="row"><span class="id">${t.id}</span><span class="title grow">${esc(t.title)}</span>${working}${badge(t.status)}</div>
         <div class="meta">${planBadge}${agents}${prog ? `<span>${prog.done}/${prog.total} subtasks</span>` : ''}${needsApproval ? `<button class="primary small" data-approve="${t.id}">Approve plan</button>` : ''}<span class="grow"></span>${chatBtn}</div>
         ${prog ? `<div class="bar"><i style="width:${(prog.done / prog.total) * 100}%"></i></div>` : ''}
       </div>`;
     };
-    el.innerHTML = roots.map((r) => card(r, false) + S.tasks.filter((k) => k.parentId === r.id).map((k) => card(k, true)).join('')).join('');
+    setHtml(el, roots.map((r) => card(r, false) + S.tasks.filter((k) => k.parentId === r.id).map((k) => card(k, true)).join('')).join(''));
   }
 
   // ---------- agents ----------
@@ -91,20 +108,26 @@
     const el = $('#agents');
     $('#agents-count').textContent = S.agents.length || '';
     if (!S.agents.length) {
-      el.innerHTML = '<div class="empty">No agents yet.<br>The supervisor spawns them when a task needs parallel work. Easy tasks it does itself.</div>';
+      setHtml(el, empty('◎', 'No agents yet.<br>Supervisors spawn them when a task needs parallel work. Easy tasks they do themselves.'));
       return;
     }
     const order = { running: 0, starting: 0, failed: 1, stopped: 2, done: 3 };
     const list = [...S.agents].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.id.localeCompare(a.id, undefined, { numeric: true }));
-    el.innerHTML = list
-      .map((a) => `<div class="card" data-agent="${a.id}">
-        <div class="row"><span class="id">${a.id}</span><span class="title grow">${esc(a.name)}</span>${badge(a.status)}</div>
-        <div class="meta"><span class="chip">${esc(a.taskId)}</span><span>${esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || '')}</span></div>
-        <div class="activity">${esc(a.activity || '')}</div>
-        <div class="meta"><span class="chip owns" title="paths this agent may write">${a.owns?.length ? 'writes: ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span></div>
-        ${todoSummary(a)}
+    setHtml(
+      el,
+      list
+        .map((a) => `<div class="card agent s-${a.status}" data-agent="${a.id}">
+        ${avatar(a)}
+        <div class="grow">
+          <div class="row"><span class="title grow">${esc(a.name)}</span><span class="id">${a.id}</span>${badge(a.status)}</div>
+          <div class="meta" style="margin-top:3px"><span class="chip">${esc(a.taskId)}</span><span class="title">${esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || '')}</span></div>
+          <div class="activity">${isLive(a) ? typing : ''}<span class="title">${esc(a.activity || '')}</span></div>
+          <div class="meta"><span class="chip owns" title="paths this agent may write">${a.owns?.length ? 'writes ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span></div>
+          ${todoSummary(a)}
+        </div>
       </div>`)
-      .join('');
+        .join('')
+    );
   }
 
   // ---------- chat ----------
@@ -122,7 +145,7 @@
     el.innerHTML = '';
     const mine = chat.filter((e) => e.scope === scope);
     if (!mine.length) {
-      el.innerHTML = `<div class="empty">${scope === 'general' ? 'General overview: ask what is running, what is blocked, how a task is going.<br>Each task has its own supervisor chat (pick it above).' : 'No messages yet for this task.'}</div>`;
+      el.innerHTML = empty(scope === 'general' ? '◈' : '✉', scope === 'general' ? 'General overview: ask what is running, what is blocked, how a task is going.<br>Each task has its own supervisor chat (pick it above).' : 'No messages yet for this task.');
     }
     mine.forEach((e) => el.appendChild(chatNode(e)));
     el.scrollTop = el.scrollHeight;
@@ -143,7 +166,9 @@
     el.querySelector('.empty')?.remove();
     const th = $('#thinking');
     if (th) th.remove();
-    el.appendChild(chatNode(e));
+    const node = chatNode(e);
+    node.classList.add('enter');
+    el.appendChild(node);
     updateThinking();
     if (stick) el.scrollTop = el.scrollHeight;
   }
@@ -182,7 +207,7 @@
       th = document.createElement('div');
       th.id = 'thinking';
       th.className = 'thinking';
-      th.textContent = (scope === 'general' ? 'assistant' : `supervisor of ${scope}`) + ' is working…';
+      th.innerHTML = `${typing}<span>${scope === 'general' ? 'assistant' : `supervisor of ${scope}`} is working…</span>`;
       el.appendChild(th);
       el.scrollTop = el.scrollHeight;
     } else if (!working && th) th.remove();
@@ -194,11 +219,13 @@
   const sheet = $('#sheet');
   function openModal(view) {
     openView = view;
+    sheet.dataset.sig = ''; // always rebuild on open
     renderModal();
     modal.classList.remove('hidden');
   }
   function closeModal() {
     openView = null;
+    sheet.dataset.sig = '';
     modal.classList.add('hidden');
   }
   function renderModal() {
@@ -207,69 +234,143 @@
     if (openView.type === 'task') return renderTaskDetail();
     if (openView.type === 'agent') return renderAgentDetail();
   }
+  const shell = ({ head, tabs = '', body, foot, tag = 'div', attrs = '' }) => `<${tag} class="shell" ${attrs}>
+    <div class="sheet-head">${head}<button type="button" class="x" data-close title="Close (Esc)">✕</button></div>
+    ${tabs}<div class="sheet-body" id="sheet-body">${body}</div>
+    <div class="sheet-foot">${foot}</div></${tag}>`;
+
+  // Rebuild the dialog only when its content signature changed; keep the body scroll position.
+  function paint(view, id, sig, html) {
+    const same = sheet.dataset.view === view && sheet.dataset.id === id;
+    if (same && sheet.dataset.sig === sig) return false;
+    const top = $('#sheet-body')?.scrollTop ?? 0;
+    sheet.dataset.view = view;
+    sheet.dataset.id = id;
+    sheet.dataset.sig = sig;
+    sheet.innerHTML = html;
+    if (same) $('#sheet-body').scrollTop = top;
+    return true;
+  }
+
   function renderNewTask() {
     if (sheet.dataset.view === 'new') return; // do not wipe the form on state refresh
     sheet.dataset.view = 'new';
-    sheet.innerHTML = `<h3>New task</h3><div class="muted">The supervisor decides whether to do it alone or with subagents. No work starts without an approved plan.</div>
-      <form id="new-form">
-        <label>What should be done? *</label><textarea name="prompt" rows="5" required placeholder="Describe the task"></textarea>
+    sheet.innerHTML = shell({
+      tag: 'form',
+      attrs: 'id="new-form"',
+      head: `<div class="avatar lg" style="--h:250">✦</div><div><h3>New task</h3><div class="sub">A supervisor takes it from here. Nothing starts without an approved plan.</div></div>`,
+      body: `<label>What should be done? *</label><textarea name="prompt" rows="5" required placeholder="Describe the task"></textarea>
         <label>Existing plan (optional): leave empty and the supervisor will draft one for your approval</label><textarea name="plan" rows="5" placeholder="1. …&#10;2. …"></textarea>
         <div class="two">
           <div><label>Open points (optional, non-blocking, may change during the work)</label><textarea name="openPoints" rows="2"></textarea></div>
           <div><label>Number of subagents (optional, empty = supervisor decides, up to ${S.config.maxAgentsPerTask || 5} at once)</label><input name="agents" type="number" min="1" max="${S.config.maxAgentsPerTask || 5}" placeholder="auto"></div>
-        </div>
-        <div class="actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Start task</button></div>
-      </form>`;
+        </div>`,
+      foot: `<button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Start task</button>`,
+    });
     $('#new-form textarea').focus();
   }
+
   function renderTaskDetail() {
     const t = S.tasks.find((x) => x.id === openView.id);
     if (!t) return closeModal();
-    sheet.dataset.view = 'task';
     const root = rootOf(t);
     const plan = root.plan;
     const agents = t.agentIds.map((id) => S.agents.find((a) => a.id === id)).filter(Boolean);
     const kids = S.tasks.filter((x) => x.parentId === t.id);
-    sheet.innerHTML = `<div class="row"><span class="id">${t.id}</span><h3 class="grow" style="margin:0">${esc(t.title)}</h3>${badge(t.status)}</div>
-      <h4>Request</h4><div class="block">${esc(t.prompt)}</div>
-      <h4>Plan ${plan ? (plan.approved ? '· approved' : '· <span style="color:var(--warn)">waiting for your approval</span>') : '· none yet'}${t.parentId ? ` (from ${root.id})` : ''}</h4>
-      ${plan ? `<div class="block">${esc(plan.text)}</div><h4>Open points (non-blocking)</h4><div class="block">${esc(plan.openPoints || '(none)')}</div>` : '<div class="muted">The supervisor has not drafted a plan yet.</div>'}
-      <div class="row" style="margin-top:12px"><button data-chat="${root.id}">Open ${root.id} supervisor chat</button></div>
-      ${agents.length ? `<h4>Agents</h4><div class="row" style="flex-wrap:wrap">${agents.map((a) => `<span class="card" data-agent="${a.id}" style="padding:4px 10px">${a.id} ${esc(a.name)} ${badge(a.status)}</span>`).join('')}</div>` : ''}
-      ${kids.length ? `<h4>Subtasks</h4>${kids.map((k) => `<div class="row" style="padding:2px 0"><span class="id">${k.id}</span><span class="grow">${esc(k.title)}</span>${badge(k.status)}</div>`).join('')}` : ''}
-      ${t.notes.length ? `<h4>Notes</h4><div class="block">${t.notes.map((n) => `${ago(n.ts)} ago · ${esc(n.text)}`).join('\n')}</div>` : ''}
-      <div class="actions">
-        ${!t.parentId && plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}
-        ${!t.parentId && !['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}
-        <button class="ghost" data-close>Close</button>
-      </div>`;
+    const prog = taskProgress(t);
+    const sig = JSON.stringify([t, plan, kids.map((k) => [k.id, k.status, k.title]), agents.map((a) => [a.id, a.status])]);
+    const planState = plan ? (plan.approved ? 'approved' : '<span style="color:var(--warn)">waiting for your approval</span>') : 'none yet';
+    paint(
+      'task',
+      t.id,
+      sig,
+      shell({
+        head: `<div class="avatar lg" style="--h:${hue(t.id)};font-size:19px">${esc(t.id)}</div>
+          <div class="grow" style="padding-right:28px"><h3>${esc(t.title)}</h3>
+          <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓' : '…') : '—'}</span>${agents.length ? `<span class="chip">${agents.length} agent${agents.length > 1 ? 's' : ''}</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}<span>created ${ago(t.createdAt)} ago</span></div></div>`,
+        body: `<h4>Request</h4><div class="block">${esc(t.prompt)}</div>
+          <h4>Plan · ${planState}${t.parentId ? ` (from ${root.id})` : ''}</h4>
+          ${plan ? `<div class="block">${esc(plan.text)}</div><h4>Open points · non-blocking</h4><div class="block">${esc(plan.openPoints || '(none)')}</div>` : '<div class="muted">The supervisor has not drafted a plan yet.</div>'}
+          ${agents.length ? `<h4>Agents</h4><div class="wrap">${agents.map((a) => `<span class="agentchip" data-agent="${a.id}">${avatar(a, 'xs')}${esc(a.name)} ${badge(a.status)}</span>`).join('')}</div>` : ''}
+          ${kids.length ? `<h4>Subtasks</h4>${kids.map((k) => `<div class="subrow"><span class="id">${k.id}</span><span class="grow title">${esc(k.title)}</span>${badge(k.status)}</div>`).join('')}` : ''}
+          ${t.notes.length ? `<h4>Notes</h4><div class="block">${t.notes.map((n) => `${ago(n.ts)} ago · ${esc(n.text)}`).join('\n')}</div>` : ''}`,
+        foot: `${!t.parentId && !['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}
+          <span class="spacer"></span>
+          <button data-chat="${root.id}">Open ${root.id} chat</button>
+          ${!t.parentId && plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}
+          <button class="ghost" data-close>Close</button>`,
+      })
+    );
   }
-  async function renderAgentDetail() {
+
+  let agentTab = 'overview';
+  const tlHtml = (e) => `<div class="tl ${e.kind}"><span class="t">${esc(e.kind === 'input' ? 'Briefing · ' + e.text.slice(0, 400) : e.text)}</span><time>${clock(e.ts)}</time></div>`;
+  const liveMarker = '<div class="tl running" id="tl-live"><span class="t muted">working…</span></div>';
+
+  function renderAgentDetail() {
     const a = S.agents.find((x) => x.id === openView.id);
     if (!a) return closeModal();
-    const logEl = $('#agent-log');
-    const keepScroll = logEl ? logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40 : true;
-    sheet.dataset.view = 'agent';
-    sheet.innerHTML = `<div class="row"><span class="id">${a.id}</span><h3 class="grow" style="margin:0">${esc(a.name)}</h3>${badge(a.status)}</div>
-      <div class="muted">on ${a.taskId} · started ${ago(a.startedAt)} ago${a.endedAt ? ' · ended ' + ago(a.endedAt) + ' ago' : ''}</div>
-      <h4>Objective</h4><div class="block">${esc(a.objective)}</div>
-      <h4>May write to</h4><div class="muted">${a.owns?.length ? esc(a.owns.map((p) => p || '. (whole workspace)').join(', ')) : 'nothing (read-only agent)'}</div>
-      <h4>Its own checklist</h4>${a.todos.length ? `<ul class="checklist">${a.todos.map((t) => `<li class="${t.status}">${esc(t.text)}</li>`).join('')}</ul>` : '<div class="muted">The agent has not written a checklist yet.</div>'}
-      ${a.report ? `<h4>Final report</h4><div class="block">${esc(a.report)}</div>` : ''}
-      <h4>Live activity (read-only)</h4><div class="log" id="agent-log">${agentLogHtml()}</div>
-      <div class="actions">${['running', 'starting'].includes(a.status) ? `<button class="danger" data-stop="${a.id}">Stop agent</button>` : ''}<button class="ghost" data-close>Close</button></div>`;
-    const l = $('#agent-log');
-    if (keepScroll) l.scrollTop = l.scrollHeight;
+    const task = S.tasks.find((t) => t.id === a.taskId);
+    const live = isLive(a);
+    const done = a.todos.filter((t) => t.status === 'done').length;
+    const pct = a.todos.length ? Math.round((done / a.todos.length) * 100) : 0;
+    const sig = JSON.stringify([a.status, a.todos, a.report, a.endedAt, a.owns, a.objective, agentTab, task?.title]);
+    const activityLine = `${live ? typing : ''}<span class="title">${esc(a.activity || '')}</span>`;
+
+    const overview = `<div class="grid2">
+        <div>
+          <h4>Objective</h4><div class="block">${esc(a.objective)}</div>
+          <h4>Can write to</h4><div class="paths">${a.owns?.length ? a.owns.map((p) => `<span class="path">${esc(p || '.')}</span>`).join('') : '<span class="path ro">nothing · read-only agent</span>'}</div>
+        </div>
+        <div>
+          <h4>Its own checklist</h4>
+          ${a.todos.length ? `<div class="prog"><div class="ring" style="--p:${pct}"><span>${pct}%</span></div><div><b>${done} of ${a.todos.length}</b> steps done</div></div>
+            <ul class="checklist">${a.todos.map((t) => `<li class="${t.status}">${esc(t.text)}</li>`).join('')}</ul>` : '<div class="muted">The agent has not written a checklist yet.</div>'}
+        </div>
+      </div>
+      ${a.report ? `<h4>${a.status === 'done' ? 'Final report' : 'Last message'}</h4><div class="block report ${a.status === 'done' ? '' : 'bad'}">${esc(a.report)}</div>` : ''}`;
+    const activity = `<div class="timeline" id="agent-log">${agentLog.map(tlHtml).join('')}${live ? liveMarker : ''}</div>`;
+
+    const rebuilt = paint(
+      'agent',
+      a.id,
+      sig,
+      shell({
+        head: `${avatar(a, 'lg')}
+          <div class="grow" style="padding-right:28px">
+            <div class="row" style="gap:10px"><h3>${esc(a.name)}</h3><span class="id">${a.id}</span>${badge(a.status)}</div>
+            <div class="sub"><span class="chip" data-task="${a.taskId}" style="cursor:pointer">${esc(a.taskId)}${task ? ' · ' + esc(task.title.slice(0, 40)) : ''}</span><span>started ${ago(a.startedAt)} ago</span><span class="chip" id="agent-dur">${dur(a)}</span></div>
+            <div class="activity" id="agent-activity">${activityLine}</div>
+          </div>`,
+        tabs: `<div class="sheet-tabs">
+          <button class="tab ${agentTab === 'overview' ? 'on' : ''}" data-tab="overview">Overview</button>
+          <button class="tab ${agentTab === 'activity' ? 'on' : ''}" data-tab="activity">Activity<span class="count" id="act-count">${agentLog.length}</span></button></div>`,
+        body: agentTab === 'overview' ? overview : activity,
+        foot: `${live ? `<button class="danger" data-stop="${a.id}">Stop agent</button>` : ''}<span class="spacer"></span><button class="ghost" data-close>Close</button>`,
+      })
+    );
+    if (rebuilt && agentTab === 'activity') {
+      const b = $('#sheet-body');
+      b.scrollTop = b.scrollHeight;
+    }
+    if (!rebuilt) {
+      // cheap in-place refresh of the live bits
+      const act = $('#agent-activity');
+      if (act) setHtml(act, activityLine);
+      const d = $('#agent-dur');
+      if (d) d.textContent = dur(a);
+    }
   }
-  const agentLogHtml = () => agentLog.filter((e) => e.kind !== 'input' || true).map((e) => `<div class="${e.kind}">${esc(e.kind === 'tool' ? '→ ' + e.text : e.kind === 'input' ? '▸ ' + e.text : e.text)}</div>`).join('');
 
   async function openAgent(id) {
     agentLog = [];
+    agentTab = 'overview';
     openModal({ type: 'agent', id });
     try {
       const { log } = await api('GET', `/agents/${id}/log`);
       if (openView?.type === 'agent' && openView.id === id) {
         agentLog = log;
+        sheet.dataset.sig = '';
         renderAgentDetail();
       }
     } catch {}
@@ -279,6 +380,12 @@
   document.addEventListener('click', async (ev) => {
     const t = ev.target;
     if (t.closest('[data-close]') || t === modal) return closeModal();
+    const tab = t.closest('[data-tab]');
+    if (tab) {
+      agentTab = tab.dataset.tab;
+      sheet.dataset.sig = '';
+      return renderAgentDetail();
+    }
     const ch = t.closest('[data-chat]');
     if (ch) {
       closeModal();
@@ -325,8 +432,13 @@
       const text = box.value.trim();
       if (!text) return;
       box.value = '';
+      box.style.height = 'auto';
       await api('POST', '/chat', { scope, text }).catch(() => (box.value = text));
     }
+  });
+  $('#msg').addEventListener('input', (e) => {
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
   });
   $('#msg').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -362,14 +474,16 @@
       const { agentId, entry } = JSON.parse(e.data);
       if (openView?.type === 'agent' && openView.id === agentId) {
         agentLog.push(entry);
+        const cnt = $('#act-count');
+        if (cnt) cnt.textContent = agentLog.length;
         const l = $('#agent-log');
         if (l) {
-          const stick = l.scrollHeight - l.scrollTop - l.clientHeight < 40;
-          const d = document.createElement('div');
-          d.className = entry.kind;
-          d.textContent = entry.kind === 'tool' ? '→ ' + entry.text : entry.text;
-          l.appendChild(d);
-          if (stick) l.scrollTop = l.scrollHeight;
+          const body = $('#sheet-body');
+          const stick = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+          const marker = $('#tl-live');
+          if (marker) marker.insertAdjacentHTML('beforebegin', tlHtml(entry));
+          else l.insertAdjacentHTML('beforeend', tlHtml(entry));
+          if (stick) body.scrollTop = body.scrollHeight;
         }
       }
     });
