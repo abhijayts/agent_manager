@@ -34,7 +34,7 @@
   // token accounting (usage = { in, out, cost, runs }; `in` = everything sent to the model across all requests)
   const tok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n || 0));
   const usageTotal = (...us) => us.reduce((t, u) => ({ in: t.in + (u?.in || 0), out: t.out + (u?.out || 0), cost: t.cost + (u?.cost || 0) }), { in: 0, out: 0, cost: 0 });
-  const usageChip = (u, extra = '') => (u && u.in ? `<span class="chip tokens" title="${esc(`${u.in.toLocaleString()} input + ${u.out.toLocaleString()} output tokens · ≈$${u.cost.toFixed(3)} at API prices${extra}`)}">⛁ ${tok(u.in + u.out)}</span>` : '');
+  const usageChip = (u, extra = '') => (u && u.in ? `<span class="chip tokens" title="${esc(`${u.in.toLocaleString()} input + ${u.out.toLocaleString()} output tokens · ≈$${u.cost.toFixed(3)} at API prices${extra}`)}">${tok(u.in + u.out)} tok</span>` : '');
   const empty = (icon, html) => `<div class="empty"><b>${icon}</b>${html}</div>`;
   // Only touch the DOM when the markup really changed: keeps hover/scroll state and avoids flicker.
   const setHtml = (el, html) => {
@@ -51,6 +51,7 @@
     task: svg('<rect x="2.5" y="2.5" width="11" height="11" rx="2.5"/><path d="M5.5 8.2l1.8 1.8 3.2-3.5"/>'),
     globe: svg('<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c2 2 2 9 0 11M8 2.5c-2 2-2 9 0 11"/>'),
     chev: svg('<path d="M6 4l4 4-4 4"/>'),
+    gauge: svg('<path d="M2.5 11a5.5 5.5 0 1 1 11 0"/><path d="M8 11l2.6-3.6"/>'),
   };
   function md(text) {
     let out = esc(text);
@@ -104,6 +105,7 @@
     const p = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
     if (!p.length) return null;
     if (p[0].toLowerCase() === 'general') return { scope: 'general', view: 'chat' };
+    if (p[0].toLowerCase() === 'usage') return { scope: 'usage', view: 'usage' };
     const scope = p[0].toUpperCase();
     const root = S.tasks.find((t) => t.id === scope && !t.parentId);
     if (!root) return null;
@@ -119,7 +121,7 @@
     }
     return { scope, view: 'chat' };
   }
-  const pathOf = (n) => (n.scope === 'general' ? 'general' : [n.scope, n.view, n.id].filter(Boolean).join('/'));
+  const pathOf = (n) => (n.scope === 'general' || n.scope === 'usage' ? n.scope : [n.scope, n.view, n.id].filter(Boolean).join('/'));
   function go(path) {
     if (location.hash === '#/' + path) route();
     else location.hash = '#/' + path;
@@ -131,7 +133,7 @@
     nav = n;
     navKey = key;
     localStorage.setItem('nav', key);
-    if (n.scope !== 'general') {
+    if (n.scope !== 'general' && n.scope !== 'usage') {
       expanded.add(n.scope);
       saveExpanded();
     }
@@ -151,7 +153,22 @@
     const liveTasks = new Set(live.map(scopeOfAgent)).size;
     const open = S.tasks.filter((t) => !t.parentId && !['done', 'failed', 'cancelled'].includes(t.status)).length;
     const all = usageTotal(...Object.values(S.supervisors || {}).map((s) => s.usage), ...S.agents.map((a) => a.usage));
-    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}${all.in ? ` · ⛁ ${tok(all.in + all.out)} tokens` : ''}`;
+    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}${all.in ? ` · ${tok(all.in + all.out)} tokens` : ''}`;
+    // plan-usage gauge next to the New task button (5-hour window, from Claude Code's own report)
+    const fh = S.rateLimits?.fiveHour;
+    const sd = S.rateLimits?.sevenDay;
+    const gauge = $('#usage-gauge');
+    if (fh) {
+      const p = pct(fh.utilization);
+      $('#usage-mini').textContent = `${p}%`;
+      gauge.style.setProperty('--p', Math.min(100, p));
+      gauge.className = 'gauge lv-' + level(p);
+      $('#usage-btn').title = `5-hour window ${p}% · resets in ${until(fh.resetsAt)}${sd ? ` · weekly ${pct(sd.utilization)}%` : ''}`;
+    } else {
+      $('#usage-mini').textContent = 'Usage';
+      gauge.style.setProperty('--p', 0);
+      gauge.className = 'gauge';
+    }
     $('#stats').title = all.in ? `All supervisors and agents so far: ${all.in.toLocaleString()} input + ${all.out.toLocaleString()} output tokens (≈$${all.cost.toFixed(2)} at API prices; informational on a subscription)` : '';
   }
 
@@ -197,6 +214,9 @@
 
   // ---------- main pane: header + tabs (scoped to ONE task) ----------
   function headHtml() {
+    if (nav.scope === 'usage') {
+      return `<div class="phead"><div class="avatar" style="--h:40">${ic.gauge}</div><div class="grow"><h3>Usage</h3><div class="sub">Your Claude Code plan limits, and what this app has spent</div></div></div>`;
+    }
     if (nav.scope === 'general') {
       return `<div class="phead"><div class="avatar" style="--h:250">${ic.globe}</div><div class="grow"><h3>General overview</h3><div class="sub">Read-only assistant for the whole picture · each task has its own supervisor in the explorer</div></div></div>`;
     }
@@ -211,7 +231,7 @@
       <div class="actions">${plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}${!['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}</div></div>`;
   }
   function tabsHtml() {
-    if (nav.scope === 'general') return '';
+    if (nav.scope === 'general' || nav.scope === 'usage') return '';
     const s = nav.scope;
     const tab = (to, inner, on) => `<button class="ptab ${on ? 'on' : ''}" data-nav="${to}">${inner}</button>`;
     let h = tab(`${s}/chat`, `${ic.chat}Supervisor${unread[s] ? '<span class="unread"></span>' : sup(s).status === 'working' ? '<span class="work-dot"></span>' : ''}`, nav.view === 'chat');
@@ -248,6 +268,7 @@
       $('#msg').focus();
     } else {
       b.innerHTML = '';
+      if (nav.view === 'usage') loadUsage();
       if (nav.view === 'agent') {
         agentLog = [];
         agentTab = 'overview';
@@ -257,13 +278,17 @@
   }
 
   function updateView() {
-    if (nav.scope !== 'general' && !getTask(nav.scope)) return go('general'); // task vanished
+    if (nav.scope !== 'general' && nav.scope !== 'usage' && !getTask(nav.scope)) return go('general'); // task vanished
+    $('#usage-btn').classList.toggle('on', nav.scope === 'usage');
     setHtml($('#pane-head'), headHtml());
     setHtml($('#pane-tabs'), tabsHtml());
     if (nav.view === 'chat') {
       setHtml($('#rail'), railHtml());
       updateChatChrome();
       updateThinking();
+    } else if (nav.view === 'usage') {
+      setBody(usageHtml());
+      loadUsageSoon();
     } else if (nav.view === 'overview') setBody(overviewHtml());
     else if (nav.view === 'sub') setBody(subHtml());
     else if (nav.view === 'agent') renderAgentView();
@@ -442,9 +467,68 @@
     setHtml($('#agent-activity'), `${live ? typing : ''}<span class="title">${esc(a.activity || '')}</span>`);
     const d = $('#agent-dur');
     if (d) d.textContent = dur(a);
-    setHtml($('#agent-tok'), usageChip(a.usage) || '<span class="chip tokens">⛁ …</span>');
+    setHtml($('#agent-tok'), usageChip(a.usage) || '<span class="chip tokens">… tok</span>');
     const c = $('#act-count');
     if (c) c.textContent = agentLog.length;
+  }
+
+  // ----- usage view: Claude Code plan limits + what this app has spent -----
+  let usageData = null;
+  let usageTimer = null;
+  const pct = (v) => Math.round((v || 0) * 100);
+  const level = (p) => (p >= 85 ? 'bad' : p >= 60 ? 'warn' : 'ok');
+  const until = (sec) => {
+    const m = Math.round((sec * 1000 - Date.now()) / 60000);
+    return m <= 0 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${Math.floor(m / 1440)}d ${Math.floor((m % 1440) / 60)}h`;
+  };
+  async function loadUsage() {
+    try {
+      usageData = await api('GET', '/usage');
+      if (nav.view === 'usage') setBody(usageHtml());
+    } catch {}
+  }
+  function loadUsageSoon() {
+    if (usageTimer) return; // refresh at most every 4s while the tab is open and state keeps changing
+    usageTimer = setTimeout(() => {
+      usageTimer = null;
+      if (nav.view === 'usage') loadUsage();
+    }, 4000);
+  }
+  function meter(label, w) {
+    if (!w) return `<div class="meter-row"><div class="meter-top"><span>${label}</span><span class="muted">no reading yet</span></div><div class="meter"><i style="width:0"></i></div></div>`;
+    const p = pct(w.utilization);
+    const when = new Date(w.resetsAt * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    return `<div class="meter-row"><div class="meter-top"><span>${label}</span><b class="lv-${level(p)}">${p}%</b></div>
+      <div class="meter ${level(p)}"><i style="width:${Math.min(100, p)}%"></i></div>
+      <div class="meter-sub"><span>resets in ${until(w.resetsAt)} · ${when}</span>${w.status && w.status !== 'allowed' ? `<span class="chip warn">${esc(w.status)}</span>` : ''}</div></div>`;
+  }
+  function usageHtml() {
+    const d = usageData;
+    if (!d) return empty('◔', 'Loading usage…');
+    const rl = d.rateLimits;
+    const limits = rl
+      ? `${meter('5-hour window', rl.fiveHour)}${meter('Weekly window', rl.sevenDay)}
+        <div class="meter-sub"><span>Updated ${ago(rl.updatedAt)} ago · refreshed whenever a supervisor or agent runs</span></div>
+        <div class="meter-sub"><span>Extra usage: ${rl.overage?.using ? 'in use' : rl.overage?.status === 'rejected' ? 'not available' : esc(rl.overage?.status || 'n/a')}${rl.overage?.reason ? ' · ' + esc(String(rl.overage.reason).replace(/_/g, ' ')) : ''}</span></div>`
+      : '<div class="muted">No reading yet. Claude Code reports your limits whenever a supervisor or agent runs: start a task, or ask the General chat something.</div>';
+    const t = d.total;
+    const cache = t.in ? Math.round(((t.cr || 0) / t.in) * 100) : 0;
+    const tile = (k, v, sub = '') => `<div class="tile"><div class="tk">${k}</div><div class="tv">${v}</div><div class="ts">${sub}</div></div>`;
+    const max = Math.max(1, ...d.days.map((x) => x.in + x.out));
+    const chart = d.days
+      .map((x) => `<div class="bcol" title="${esc(`${x.date}: ${(x.in + x.out).toLocaleString()} tokens · ${x.runs} runs`)}"><div class="bwrap"><i style="height:${Math.max(x.in + x.out ? 3 : 0, ((x.in + x.out) / max) * 100)}%"></i></div><span>${x.date.slice(8)}</span></div>`)
+      .join('');
+    const table = (head, rows) => (rows.length ? `<table class="utable"><thead><tr>${head.map((h, i) => `<th class="${i ? 'num' : ''}">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div class="muted">Nothing yet.</div>');
+    return `<div class="ucard"><h4>Plan limits <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:400">· account-wide, everything you do with Claude Code on this plan</span></h4>${limits}</div>
+      <h4>This app's spend</h4>
+      <div class="tiles">${tile('Total tokens', tok(t.in + t.out), `${tok(t.in)} in · ${tok(t.out)} out`)}${tile('Today', tok(d.today.in + d.today.out), `${d.today.runs} run${d.today.runs === 1 ? '' : 's'}`)}${tile('Runs', t.runs, 'supervisor + agent runs')}${tile('Cache reads', cache + '%', 'of input was cached')}${tile('API-equivalent', '$' + t.cost.toFixed(2), 'informational on a plan')}</div>
+      <h4>Last 14 days</h4><div class="ucard"><div class="bars">${chart}</div>${d.logSince ? '' : '<div class="muted" style="margin-top:8px">Per-day history starts with the first run after this update.</div>'}</div>
+      <div class="grid2">
+        <div><h4>By model</h4>${table(['Model', 'Tokens', 'API-equiv.'], d.models.map((m) => `<tr><td>${esc(m.model)}</td><td class="num">${tok(m.in + m.out)}</td><td class="num">$${m.cost.toFixed(3)}</td></tr>`))}</div>
+        <div><h4>By task</h4>${table(['Task', 'Supervisor', 'Agents', 'Total'], [...d.tasks.map((x) => `<tr class="clickable" data-nav="${x.id}/chat"><td><span class="id">${x.id}</span> ${esc(x.title.slice(0, 28))}</td><td class="num">${tok(x.supervisor)}</td><td class="num">${tok(x.agents)}</td><td class="num"><b>${tok(x.total)}</b></td></tr>`), ...(d.general ? [`<tr><td>General chat</td><td class="num">${tok(d.general)}</td><td class="num">·</td><td class="num"><b>${tok(d.general)}</b></td></tr>`] : [])])}</div>
+      </div>
+      <h4>Heaviest agents</h4>${table(['Agent', 'Task', 'Model', 'Tokens'], d.agents.map((a) => `<tr class="clickable" data-nav="${a.task}/agent/${a.id}"><td>${esc(a.name)} <span class="id">${a.id}</span></td><td>${esc(a.task)}</td><td>${esc(a.model || 'default')}</td><td class="num"><b>${tok(a.tokens)}</b></td></tr>`))}
+      <div class="muted" style="margin:14px 0 4px;font-size:12px">Tokens = everything sent to the model across all requests (cached re-reads included) plus output. The plan limits weigh these differently, so treat the percentages above as the real gauge.</div>`;
   }
 
   // ---------- new-task modal ----------
@@ -499,6 +583,7 @@
     if (nv) return go(nv.dataset.nav);
   });
   $('#new-task').onclick = openNewTask;
+  $('#usage-btn').onclick = () => go('usage');
   $('#collapse-all').onclick = () => {
     expanded.clear();
     saveExpanded();
@@ -596,6 +681,7 @@
     setInterval(() => {
       renderHeader();
       updateChatChrome();
+      if (nav.view === 'usage') setBody(usageHtml()); // keeps the reset countdowns ticking
       const d = $('#agent-dur');
       const a = nav.view === 'agent' && S.agents.find((x) => x.id === nav.id);
       if (d && a) d.textContent = dur(a);

@@ -32,6 +32,7 @@ const h = (fn) => (req, res) => {
 };
 
 api.get('/state', h(() => m.snapshot({ withChat: true })));
+api.get('/usage', h(() => m.usageReport()));
 api.post('/tasks', h((req) => m.submitUserTask({ title: req.body.title, prompt: req.body.prompt, plan: req.body.plan, openPoints: req.body.openPoints, agents: parseInt(req.body.agents, 10) || null })));
 api.post('/tasks/:id/approve', h((req) => m.approveTask(req.params.id)));
 api.post('/tasks/:id/cancel', h((req) => m.cancelTask(req.params.id)));

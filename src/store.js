@@ -14,6 +14,9 @@ const state = {
   chat: [],
   // one supervisor per top-level task (keyed by task id) plus 'general'
   supervisors: {},
+  // latest plan-limit readings reported by Claude Code (rate_limit_event), and a per-run token log
+  rateLimits: null,
+  usageLog: [],
 };
 
 function load() {

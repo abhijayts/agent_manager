@@ -94,15 +94,91 @@ const supState = (scope) => (state.supervisors[scope] ||= { sessionId: null, sta
 // Token accounting. `result` events carry the usage of one whole run (all of its requests).
 // `in` counts everything sent to the model (fresh + cache writes + cache reads); `cost` is the
 // CLI's API-equivalent estimate (informational on a subscription).
-function addUsage(holder, ev) {
+// `cr` = cache reads (cheap), `cw` = cache writes. Each run is also appended to usageLog (with the
+// per-model split from `modelUsage`) so the Usage tab can show per-day and per-model spend.
+function addUsage(holder, ev, ctx = {}) {
   const u = ev.usage;
   if (!u) return;
-  const t = (holder.usage ||= { in: 0, out: 0, cost: 0, runs: 0 });
-  t.in += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+  const fresh = u.input_tokens || 0;
+  const cw = u.cache_creation_input_tokens || 0;
+  const cr = u.cache_read_input_tokens || 0;
+  const all = fresh + cw + cr;
+  const t = (holder.usage ||= { in: 0, out: 0, cost: 0, runs: 0, cr: 0, cw: 0 });
+  t.in += all;
   t.out += u.output_tokens || 0;
   t.cost += ev.total_cost_usd || 0;
   t.runs += 1;
+  t.cr = (t.cr || 0) + cr;
+  t.cw = (t.cw || 0) + cw;
+  const models = {};
+  for (const [name, mu] of Object.entries(ev.modelUsage || {})) {
+    models[name.replace(/^claude-/, '')] = {
+      in: (mu.inputTokens || 0) + (mu.cacheReadInputTokens || 0) + (mu.cacheCreationInputTokens || 0),
+      out: mu.outputTokens || 0,
+      cost: mu.costUSD || 0,
+    };
+  }
+  state.usageLog.push({ ts: now(), scope: ctx.scope || null, agent: ctx.agent || null, in: all, out: u.output_tokens || 0, cr, cw, cost: ev.total_cost_usd || 0, models });
+  if (state.usageLog.length > 4000) state.usageLog.splice(0, state.usageLog.length - 4000);
   changed();
+}
+
+// Claude Code reports the plan's rolling windows (5-hour and weekly) inside its event stream.
+// utilization is a 0..1 fraction; resetsAt is epoch seconds. Account-wide, not just this app.
+function noteRateLimit(info) {
+  if (!info) return;
+  const prev = state.rateLimits || {};
+  const w = info.unifiedWindows || {};
+  state.rateLimits = {
+    updatedAt: now(),
+    status: info.status || prev.status || null,
+    fiveHour: w.five_hour || prev.fiveHour || null,
+    sevenDay: w.seven_day || prev.sevenDay || null,
+    overage: { status: info.overageStatus ?? prev.overage?.status ?? null, reason: info.overageDisabledReason ?? prev.overage?.reason ?? null, using: !!info.isUsingOverage },
+  };
+  changed();
+}
+
+const day = (iso) => new Date(iso).toLocaleDateString('en-CA'); // YYYY-MM-DD in local time
+function usageReport() {
+  const sums = (list) => list.reduce((t, u) => ({ in: t.in + (u?.in || 0), out: t.out + (u?.out || 0), cost: t.cost + (u?.cost || 0), runs: t.runs + (u?.runs || 0), cr: t.cr + (u?.cr || 0), cw: t.cw + (u?.cw || 0) }), { in: 0, out: 0, cost: 0, runs: 0, cr: 0, cw: 0 });
+  const total = sums([...Object.values(state.supervisors).map((s) => s.usage), ...state.agents.map((a) => a.usage)]);
+  // last 14 local days (from the per-run log, which starts when this version was first run)
+  const days = [];
+  for (let i = 13; i >= 0; i--) days.push({ date: day(new Date(Date.now() - i * 86400000)), in: 0, out: 0, cost: 0, runs: 0 });
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  const models = {};
+  for (const e of state.usageLog) {
+    const d = byDate.get(day(e.ts));
+    if (d) {
+      d.in += e.in;
+      d.out += e.out;
+      d.cost += e.cost;
+      d.runs += 1;
+    }
+    for (const [name, mu] of Object.entries(e.models || {})) {
+      const x = (models[name] ||= { model: name, in: 0, out: 0, cost: 0 });
+      x.in += mu.in;
+      x.out += mu.out;
+      x.cost += mu.cost;
+    }
+  }
+  const tasks = state.tasks
+    .filter((t) => !t.parentId)
+    .map((t) => {
+      const s = sums([state.supervisors[t.id]?.usage]);
+      const a = sums(state.agents.filter((x) => scopeOfAgent(x) === t.id).map((x) => x.usage));
+      return { id: t.id, title: t.title, status: t.status, supervisor: s.in + s.out, agents: a.in + a.out, total: s.in + s.out + a.in + a.out, cost: s.cost + a.cost };
+    })
+    .filter((t) => t.total > 0)
+    .sort((a, b) => b.total - a.total);
+  const gen = sums([state.supervisors[GENERAL]?.usage]);
+  const agents = state.agents
+    .filter((a) => a.usage)
+    .map((a) => ({ id: a.id, name: a.name, task: a.taskId, model: a.model, tokens: a.usage.in + a.usage.out, cost: a.usage.cost }))
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 8);
+  return { rateLimits: state.rateLimits, total, today: days[days.length - 1], days, models: Object.values(models).sort((a, b) => b.in + b.out - (a.in + a.out)), tasks, general: gen.in + gen.out, agents, logSince: state.usageLog[0]?.ts || null };
 }
 
 function validScope(scope) {
@@ -157,8 +233,10 @@ function pump(scope) {
       if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) {
         st.sessionId = ev.session_id;
         changed();
+      } else if (ev.type === 'rate_limit_event') {
+        noteRateLimit(ev.rate_limit_info);
       } else if (ev.type === 'result') {
-        addUsage(st, ev);
+        addUsage(st, ev, { scope });
         if (ev.is_error) addChat(scope, 'system', `Supervisor error: ${String(ev.result || ev.subtype).slice(0, 500)}`);
       }
       for (const e of toLogEntries(ev)) addChat(scope, e.kind === 'text' ? 'supervisor' : e.kind, e.text);
@@ -457,10 +535,11 @@ function startAgentRun(agent, prompt) {
     model: agent.model,
     onEvent(ev) {
       if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) agent.sessionId = ev.session_id;
+      else if (ev.type === 'rate_limit_event') noteRateLimit(ev.rate_limit_info);
       else if (ev.type === 'result') {
         finalResult = ev.result;
         isError = !!ev.is_error;
-        addUsage(agent, ev);
+        addUsage(agent, ev, { scope, agent: agent.id });
       }
       for (const e of toLogEntries(ev)) pushLog(agent, e);
       changed();
@@ -548,6 +627,7 @@ function snapshot({ withChat = false } = {}) {
     tasks: state.tasks,
     agents: state.agents.map(({ log, stopQuiet, ...a }) => ({ ...a, logCount: log.length })),
     supervisors,
+    rateLimits: state.rateLimits,
     config: { maxAgentsPerTask: config.maxAgentsPerTask, workspace: WORKSPACE, permissionMode: config.permissionMode },
   };
   if (withChat) s.chat = state.chat;
@@ -580,5 +660,5 @@ module.exports = {
   addChat, sendUserMessage, stopSupervisor, validScope,
   submitUserTask, createTask, setPlan, updateOpenPoints, approveTask, updateTask, cancelTask, taskSummary,
   spawnAgent, sendToAgent, stopAgent, setAgentTodos,
-  snapshot, recover,
+  snapshot, recover, usageReport,
 };
