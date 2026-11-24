@@ -11,7 +11,8 @@ const state = {
   tasks: [],
   agents: [],
   chat: [],
-  supervisor: { sessionId: null, status: 'idle', since: null },
+  // one supervisor per top-level task (keyed by task id) plus 'general'
+  supervisors: {},
 };
 
 function load() {

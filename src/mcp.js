@@ -1,6 +1,7 @@
 // MCP endpoints the spawned `claude` processes connect to.
-//   /mcp/supervisor      -> "manager" tools (task list, plan, spawn agents)
-//   /mcp/agent/:agentId  -> "me" tools (an agent's own checklist only)
+//   /mcp/supervisor/:scope  -> "manager" tools. scope = a top-level task id (full tools, limited to
+//                              that task's family) or "general" (read-only overview of everything)
+//   /mcp/agent/:agentId     -> "me" tools (an agent's own checklist only)
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 const { z } = require('zod');
@@ -17,78 +18,93 @@ const wrap = (fn) => async (args) => {
   }
 };
 
-function supervisorServer() {
+function supervisorServer(scope) {
+  const general = scope === m.GENERAL;
   const s = new McpServer({ name: 'manager', version: '1.0.0' });
   const tool = (name, description, inputSchema, fn) => s.registerTool(name, { description, inputSchema }, wrap(fn));
 
-  tool('list_tasks', 'List every task (and subtask) with status, plan approval and assigned agents.', {}, () => ({
-    tasks: require('./store').state.tasks.map(m.taskSummary),
+  // ----- read tools (both kinds of supervisor) -----
+  tool('list_tasks', 'List tasks (and subtasks) with status, plan approval and assigned agents.', {}, () => ({
+    tasks: m.family(scope).map(m.taskSummary),
   }));
 
   tool('get_task', 'Full detail of one task: prompt, plan, open points, notes, agents.', { task_id: z.string() }, ({ task_id }) => {
-    const t = m.getTask(task_id);
-    if (!t) throw new m.UserError('No such task: ' + task_id);
+    const t = m.taskInScope(scope, task_id);
     return { ...t, planApproved: m.planApproved(t), rootTask: m.rootOf(t).id };
   });
 
+  tool('list_agents', 'List agents with status, task, current activity and checklist.', {}, () => ({
+    agents: m.agentsOf(scope).map((a) => ({ id: a.id, name: a.name, task: a.taskId, status: a.status, activity: a.activity, owns: a.owns, todos: a.todos })),
+  }));
+
+  tool('get_agent_report', 'Final report (if finished) plus recent activity and checklist of an agent.', { agent: z.string().describe('id or name') }, ({ agent }) => {
+    const a = m.agentInScope(scope, agent);
+    return { id: a.id, name: a.name, task: a.taskId, status: a.status, owns: a.owns, objective: a.objective, todos: a.todos, report: a.report, recent: a.log.slice(-15).map((l) => `${l.kind}: ${l.text.slice(0, 200)}`) };
+  });
+
+  if (general) return s; // the general overview is read-only
+
+  // ----- write tools (task supervisors only) -----
   tool(
     'create_task',
-    'Add a task to the central list. Use parent_id to create a subtask of an existing task (e.g. one per agent).',
+    `Add a subtask under ${scope} (or under one of its subtasks with parent_id), e.g. one per agent.`,
     { title: z.string(), description: z.string().optional(), parent_id: z.string().optional() },
-    ({ title, description, parent_id }) => m.taskSummary(m.createTask({ title, prompt: description || title, parentId: parent_id }))
+    ({ title, description, parent_id }) => {
+      m.taskInScope(scope, parent_id || scope);
+      return m.taskSummary(m.createTask({ title, prompt: description || title, parentId: parent_id || scope }));
+    }
   );
 
   tool(
     'set_plan',
-    'Save a draft plan for a top-level task. The user must approve it in the UI before any work starts. open_points are non-blocking unknowns that may change during execution.',
+    'Save a draft plan for the top-level task. The user must approve it in the UI before any work starts. open_points are non-blocking unknowns that may change during execution.',
     { task_id: z.string(), plan: z.string(), open_points: z.string().optional() },
-    ({ task_id, plan, open_points }) => m.taskSummary(m.setPlan(task_id, plan, open_points))
-  );
-
-  tool(
-    'update_open_points',
-    'Replace the open-points list of a plan (e.g. after one is resolved). Allowed even after approval.',
-    { task_id: z.string(), open_points: z.string() },
-    ({ task_id, open_points }) => {
-      m.updateOpenPoints(task_id, open_points);
-      return 'updated';
+    ({ task_id, plan, open_points }) => {
+      m.taskInScope(scope, task_id);
+      return m.taskSummary(m.setPlan(task_id, plan, open_points));
     }
   );
+
+  tool('update_open_points', 'Replace the open-points list of a plan (e.g. after one is resolved). Allowed even after approval.', { task_id: z.string(), open_points: z.string() }, ({ task_id, open_points }) => {
+    m.taskInScope(scope, task_id);
+    m.updateOpenPoints(task_id, open_points);
+    return 'updated';
+  });
 
   tool(
     'update_task',
     'Update status/title/note of a task. status: in_progress | blocked | done | failed | cancelled. in_progress/blocked/done are rejected unless the plan is approved.',
     { task_id: z.string(), status: z.enum(['in_progress', 'blocked', 'done', 'failed', 'cancelled']).optional(), title: z.string().optional(), note: z.string().optional() },
-    (a) => m.taskSummary(m.updateTask(a.task_id, a))
+    (a) => {
+      m.taskInScope(scope, a.task_id);
+      return m.taskSummary(m.updateTask(a.task_id, a));
+    }
   );
 
   tool(
     'spawn_subagent',
-    'Start a subagent (separate Claude Code process) on a task or subtask. Rejected unless the plan is approved. The agent does not see the chat: the objective must be self-contained. Returns immediately; you will be woken when it finishes.',
-    { task_id: z.string(), name: z.string().describe('short kebab-case label, e.g. api-builder'), objective: z.string(), instructions: z.string().optional() },
-    ({ task_id, name, objective, instructions }) => {
-      const a = m.spawnAgent({ taskId: task_id, name, objective, instructions });
-      return { id: a.id, name: a.name, task: a.taskId, status: a.status };
+    'Start a subagent (separate Claude Code process) on a task or subtask. Rejected unless the plan is approved, or if "owns" overlaps a running agent. The agent does not see the chat: the objective must be self-contained. Returns immediately; you will be woken when it finishes.',
+    {
+      task_id: z.string(),
+      name: z.string().describe('short kebab-case label, e.g. api-builder'),
+      objective: z.string(),
+      owns: z.array(z.string()).describe('workspace-relative files/folders this agent may WRITE. Use [] for a read-only agent. Must not overlap any running agent.'),
+      instructions: z.string().optional(),
+    },
+    ({ task_id, name, objective, instructions, owns }) => {
+      m.taskInScope(scope, task_id);
+      const a = m.spawnAgent({ taskId: task_id, name, objective, instructions, owns });
+      return { id: a.id, name: a.name, task: a.taskId, status: a.status, owns: a.owns };
     }
   );
 
-  tool('list_agents', 'List all agents with status, task and current activity.', {}, () => ({
-    agents: require('./store').state.agents.map((a) => ({ id: a.id, name: a.name, task: a.taskId, status: a.status, activity: a.activity, todos: a.todos })),
-  }));
-
-  tool('get_agent_report', 'Final report (if finished) plus recent activity and checklist of an agent.', { agent: z.string().describe('id or name') }, ({ agent }) => {
-    const a = m.findAgent(agent);
-    if (!a) throw new m.UserError('No such agent: ' + agent);
-    return { id: a.id, name: a.name, task: a.taskId, status: a.status, objective: a.objective, todos: a.todos, report: a.report, recent: a.log.slice(-15).map((l) => `${l.kind}: ${l.text.slice(0, 200)}`) };
-  });
-
   tool('send_to_subagent', 'Send a follow-up instruction to a FINISHED agent (resumes its session).', { agent: z.string(), message: z.string() }, ({ agent, message }) => {
-    const a = m.sendToAgent(agent, message);
+    const a = m.sendToAgent(agent, message, scope);
     return `${a.id} resumed`;
   });
 
   tool('stop_subagent', 'Stop a running agent.', { agent: z.string() }, ({ agent }) => {
-    const a = m.stopAgent(agent);
+    const a = m.stopAgent(agent, { scope });
     return `${a.id} stopping`;
   });
 
@@ -123,7 +139,14 @@ async function handle(server, req, res) {
 }
 
 function mount(app) {
-  app.post('/mcp/supervisor', (req, res) => handle(supervisorServer(), req, res));
+  app.post('/mcp/supervisor/:scope', (req, res) => {
+    try {
+      m.validScope(req.params.scope);
+    } catch {
+      return res.status(404).json({ error: 'unknown supervisor scope' });
+    }
+    return handle(supervisorServer(req.params.scope), req, res);
+  });
   app.post('/mcp/agent/:id', (req, res) => {
     if (!m.getAgent(req.params.id)) return res.status(404).json({ error: 'unknown agent' });
     return handle(agentServer(req.params.id), req, res);

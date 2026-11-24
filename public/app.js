@@ -1,7 +1,10 @@
 (() => {
   const $ = (s) => document.querySelector(s);
-  let S = { tasks: [], agents: [], supervisor: { status: 'idle' }, config: {} };
-  const chat = [];
+  let S = { tasks: [], agents: [], supervisors: { general: { status: 'idle' } }, config: {} };
+  const chat = []; // every scope; the panel shows only the selected one
+  let scope = localStorage.getItem('scope') || 'general';
+  const unread = {};
+  const sup = (id) => S.supervisors?.[id] || { status: 'idle' };
   let openView = null; // { type: 'task'|'agent'|'new', id }
   let agentLog = []; // log of the agent drawer that is currently open
 
@@ -18,12 +21,12 @@
     out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
     return out;
   }
-  function toast(msg) {
+  function toast(msg, kind = 'error', ms = 4000) {
     const t = $('#toast');
     t.textContent = msg;
-    t.classList.remove('hidden');
+    t.className = 'toast ' + kind;
     clearTimeout(toast.t);
-    toast.t = setTimeout(() => t.classList.add('hidden'), 4000);
+    toast.t = setTimeout(() => t.classList.add('hidden'), ms);
   }
   async function api(method, url, body) {
     const r = await fetch('/api' + url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
@@ -37,13 +40,13 @@
 
   // ---------- header ----------
   function renderHeader() {
-    const working = S.supervisor.status === 'working';
-    $('#sup-pill').className = 'pill ' + (working ? 'working' : 'idle');
-    $('#sup-text').textContent = working ? `supervisor working · ${ago(S.supervisor.since)}` : 'supervisor idle';
-    $('#sup-stop').classList.toggle('hidden', !working);
-    const run = S.agents.filter((a) => ['running', 'starting'].includes(a.status)).length;
-    const open = S.tasks.filter((t) => !['done', 'failed', 'cancelled'].includes(t.status)).length;
-    $('#stats').textContent = `${run}/${S.config.maxAgents ?? '?'} agents running · ${open} open tasks`;
+    const workingN = Object.values(S.supervisors || {}).filter((s) => s.status === 'working').length;
+    $('#sup-pill').className = 'pill ' + (workingN ? 'working' : 'idle');
+    $('#sup-text').textContent = workingN ? `${workingN} supervisor${workingN > 1 ? 's' : ''} working` : 'supervisors idle';
+    const live = S.agents.filter((a) => ['running', 'starting'].includes(a.status));
+    const liveTasks = new Set(live.map((a) => rootOf(S.tasks.find((t) => t.id === a.taskId) || { id: a.taskId }).id)).size;
+    const open = S.tasks.filter((t) => !t.parentId && !['done', 'failed', 'cancelled'].includes(t.status)).length;
+    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}`;
   }
 
   // ---------- tasks ----------
@@ -66,9 +69,11 @@
       const prog = taskProgress(t);
       const planBadge = sub ? '' : t.plan ? (t.plan.approved ? '<span class="chip">plan ✓</span>' : '<span class="chip" style="color:var(--warn)">plan: needs your approval</span>') : '<span class="chip">no plan</span>';
       const agents = t.agentIds.map((id) => `<span class="chip">${esc(id)}</span>`).join('');
+      const working = !sub && sup(t.id).status === 'working' ? '<span class="work-dot" title="its supervisor is working"></span>' : '';
+      const chatBtn = sub ? '' : `<button class="ghost small" data-chat="${t.id}">${unread[t.id] ? '● ' : ''}chat</button>`;
       return `<div class="card ${sub ? 'sub' : ''}" data-task="${t.id}">
-        <div class="row"><span class="id">${t.id}</span><span class="title grow">${esc(t.title)}</span>${badge(t.status)}</div>
-        <div class="meta">${planBadge}${agents}${prog ? `<span>${prog.done}/${prog.total} subtasks</span>` : ''}${needsApproval ? `<button class="primary small" data-approve="${t.id}">Approve plan</button>` : ''}</div>
+        <div class="row"><span class="id">${t.id}</span><span class="title grow">${esc(t.title)}</span>${working}${badge(t.status)}</div>
+        <div class="meta">${planBadge}${agents}${prog ? `<span>${prog.done}/${prog.total} subtasks</span>` : ''}${needsApproval ? `<button class="primary small" data-approve="${t.id}">Approve plan</button>` : ''}<span class="grow"></span>${chatBtn}</div>
         ${prog ? `<div class="bar"><i style="width:${(prog.done / prog.total) * 100}%"></i></div>` : ''}
       </div>`;
     };
@@ -96,6 +101,7 @@
         <div class="row"><span class="id">${a.id}</span><span class="title grow">${esc(a.name)}</span>${badge(a.status)}</div>
         <div class="meta"><span class="chip">${esc(a.taskId)}</span><span>${esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || '')}</span></div>
         <div class="activity">${esc(a.activity || '')}</div>
+        <div class="meta"><span class="chip owns" title="paths this agent may write">${a.owns?.length ? 'writes: ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span></div>
         ${todoSummary(a)}
       </div>`)
       .join('');
@@ -114,29 +120,69 @@
   function renderChatAll() {
     const el = $('#chat');
     el.innerHTML = '';
-    chat.forEach((e) => el.appendChild(chatNode(e)));
+    const mine = chat.filter((e) => e.scope === scope);
+    if (!mine.length) {
+      el.innerHTML = `<div class="empty">${scope === 'general' ? 'General overview: ask what is running, what is blocked, how a task is going.<br>Each task has its own supervisor chat (pick it above).' : 'No messages yet for this task.'}</div>`;
+    }
+    mine.forEach((e) => el.appendChild(chatNode(e)));
     el.scrollTop = el.scrollHeight;
     updateThinking();
   }
   function appendChat(e) {
+    chat.push(e);
+    if (e.scope !== scope) {
+      if (e.role === 'supervisor' && e.scope !== 'general') {
+        unread[e.scope] = (unread[e.scope] || 0) + 1;
+        renderScopeSelect();
+        renderTasks();
+      }
+      return;
+    }
     const el = $('#chat');
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    chat.push(e);
+    el.querySelector('.empty')?.remove();
     const th = $('#thinking');
     if (th) th.remove();
     el.appendChild(chatNode(e));
     updateThinking();
     if (stick) el.scrollTop = el.scrollHeight;
   }
+
+  let scopeSig = '';
+  function renderScopeSelect() {
+    const roots = S.tasks.filter((t) => !t.parentId).reverse();
+    const opts = [{ id: 'general', label: 'General overview' }, ...roots.map((t) => ({ id: t.id, label: `${t.id} · ${t.title.slice(0, 40)}` }))];
+    if (!opts.some((o) => o.id === scope)) scope = 'general';
+    const sig = JSON.stringify(opts.map((o) => [o.id, o.label, sup(o.id).status, unread[o.id] || 0])) + scope;
+    const st = sup(scope);
+    $('#scope-state').textContent = st.status === 'working' ? `working · ${ago(st.since)}${st.queued ? ` · ${st.queued} queued` : ''}` : 'idle';
+    $('#sup-stop').classList.toggle('hidden', st.status !== 'working');
+    if (sig === scopeSig) return;
+    scopeSig = sig;
+    const sel = $('#scope');
+    sel.innerHTML = opts.map((o) => `<option value="${o.id}">${esc((unread[o.id] ? '● ' : '') + (sup(o.id).status === 'working' ? '… ' : '') + o.label)}</option>`).join('');
+    sel.value = scope;
+    $('#msg').placeholder = scope === 'general' ? 'Ask for an overview…  (read-only; use a task chat to direct work)' : `Message the supervisor of ${scope}…  (@a1 or @name to point at an agent · Enter to send)`;
+  }
+  function selectScope(id) {
+    scope = id;
+    localStorage.setItem('scope', id);
+    unread[id] = 0;
+    scopeSig = '';
+    renderScopeSelect();
+    renderTasks();
+    renderChatAll();
+    $('#msg').focus();
+  }
   function updateThinking() {
     const el = $('#chat');
     let th = $('#thinking');
-    const working = S.supervisor.status === 'working';
+    const working = sup(scope).status === 'working';
     if (working && !th) {
       th = document.createElement('div');
       th.id = 'thinking';
       th.className = 'thinking';
-      th.textContent = 'supervisor is working…';
+      th.textContent = (scope === 'general' ? 'assistant' : `supervisor of ${scope}`) + ' is working…';
       el.appendChild(th);
       el.scrollTop = el.scrollHeight;
     } else if (!working && th) th.remove();
@@ -170,7 +216,7 @@
         <label>Existing plan (optional): leave empty and the supervisor will draft one for your approval</label><textarea name="plan" rows="5" placeholder="1. …&#10;2. …"></textarea>
         <div class="two">
           <div><label>Open points (optional, non-blocking, may change during the work)</label><textarea name="openPoints" rows="2"></textarea></div>
-          <div><label>Number of subagents (optional, empty = supervisor decides)</label><input name="agents" type="number" min="1" max="${S.config.maxAgents || 10}" placeholder="auto"></div>
+          <div><label>Number of subagents (optional, empty = supervisor decides, up to ${S.config.maxAgentsPerTask || 5} at once)</label><input name="agents" type="number" min="1" max="${S.config.maxAgentsPerTask || 5}" placeholder="auto"></div>
         </div>
         <div class="actions"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Start task</button></div>
       </form>`;
@@ -188,6 +234,7 @@
       <h4>Request</h4><div class="block">${esc(t.prompt)}</div>
       <h4>Plan ${plan ? (plan.approved ? '· approved' : '· <span style="color:var(--warn)">waiting for your approval</span>') : '· none yet'}${t.parentId ? ` (from ${root.id})` : ''}</h4>
       ${plan ? `<div class="block">${esc(plan.text)}</div><h4>Open points (non-blocking)</h4><div class="block">${esc(plan.openPoints || '(none)')}</div>` : '<div class="muted">The supervisor has not drafted a plan yet.</div>'}
+      <div class="row" style="margin-top:12px"><button data-chat="${root.id}">Open ${root.id} supervisor chat</button></div>
       ${agents.length ? `<h4>Agents</h4><div class="row" style="flex-wrap:wrap">${agents.map((a) => `<span class="card" data-agent="${a.id}" style="padding:4px 10px">${a.id} ${esc(a.name)} ${badge(a.status)}</span>`).join('')}</div>` : ''}
       ${kids.length ? `<h4>Subtasks</h4>${kids.map((k) => `<div class="row" style="padding:2px 0"><span class="id">${k.id}</span><span class="grow">${esc(k.title)}</span>${badge(k.status)}</div>`).join('')}` : ''}
       ${t.notes.length ? `<h4>Notes</h4><div class="block">${t.notes.map((n) => `${ago(n.ts)} ago · ${esc(n.text)}`).join('\n')}</div>` : ''}
@@ -206,6 +253,7 @@
     sheet.innerHTML = `<div class="row"><span class="id">${a.id}</span><h3 class="grow" style="margin:0">${esc(a.name)}</h3>${badge(a.status)}</div>
       <div class="muted">on ${a.taskId} · started ${ago(a.startedAt)} ago${a.endedAt ? ' · ended ' + ago(a.endedAt) + ' ago' : ''}</div>
       <h4>Objective</h4><div class="block">${esc(a.objective)}</div>
+      <h4>May write to</h4><div class="muted">${a.owns?.length ? esc(a.owns.map((p) => p || '. (whole workspace)').join(', ')) : 'nothing (read-only agent)'}</div>
       <h4>Its own checklist</h4>${a.todos.length ? `<ul class="checklist">${a.todos.map((t) => `<li class="${t.status}">${esc(t.text)}</li>`).join('')}</ul>` : '<div class="muted">The agent has not written a checklist yet.</div>'}
       ${a.report ? `<h4>Final report</h4><div class="block">${esc(a.report)}</div>` : ''}
       <h4>Live activity (read-only)</h4><div class="log" id="agent-log">${agentLogHtml()}</div>
@@ -231,6 +279,11 @@
   document.addEventListener('click', async (ev) => {
     const t = ev.target;
     if (t.closest('[data-close]') || t === modal) return closeModal();
+    const ch = t.closest('[data-chat]');
+    if (ch) {
+      closeModal();
+      return selectScope(ch.dataset.chat);
+    }
     const ap = t.closest('[data-approve]');
     if (ap) {
       ev.stopPropagation();
@@ -253,20 +306,26 @@
     sheet.dataset.view = '';
     openModal({ type: 'new' });
   };
-  $('#sup-stop').onclick = () => api('POST', '/supervisor/stop').catch(() => {});
+  $('#sup-stop').onclick = () => api('POST', `/supervisors/${scope}/stop`).catch(() => {});
+  $('#scope').onchange = (e) => selectScope(e.target.value);
   document.addEventListener('keydown', (e) => e.key === 'Escape' && closeModal());
   document.addEventListener('submit', async (e) => {
     if (e.target.id === 'new-form') {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(e.target));
-      await api('POST', '/tasks', f).then(closeModal).catch(() => {});
+      await api('POST', '/tasks', f)
+        .then((task) => {
+          closeModal();
+          selectScope(task.id); // jump to the new task's own supervisor chat
+        })
+        .catch(() => {});
     } else if (e.target.id === 'composer') {
       e.preventDefault();
       const box = $('#msg');
       const text = box.value.trim();
       if (!text) return;
       box.value = '';
-      await api('POST', '/chat', { text }).catch(() => (box.value = text));
+      await api('POST', '/chat', { scope, text }).catch(() => (box.value = text));
     }
   });
   $('#msg').addEventListener('keydown', (e) => {
@@ -280,6 +339,7 @@
     renderHeader();
     renderTasks();
     renderAgents();
+    renderScopeSelect();
     updateThinking();
     if (openView && openView.type !== 'new') renderModal();
   }
@@ -297,6 +357,7 @@
       renderAll();
     });
     es.addEventListener('chat', (e) => appendChat(JSON.parse(e.data)));
+    es.addEventListener('notice', (e) => toast(JSON.parse(e.data).text, 'info', 8000));
     es.addEventListener('log', (e) => {
       const { agentId, entry } = JSON.parse(e.data);
       if (openView?.type === 'agent' && openView.id === agentId) {
@@ -313,7 +374,10 @@
       }
     });
     es.onerror = () => {}; // EventSource reconnects by itself
-    setInterval(renderHeader, 5000);
+    setInterval(() => {
+      renderHeader();
+      renderScopeSelect();
+    }, 5000);
   }
   init();
 })();

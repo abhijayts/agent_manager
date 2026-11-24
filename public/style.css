@@ -92,6 +92,12 @@ textarea:focus, input:focus { outline: none; border-color: var(--accent); }
 .checklist li.in_progress::before { content: "◐ "; color: var(--info); }
 .checklist li.done::before { content: "● "; color: var(--ok); }
 .checklist li.done { color: var(--muted); text-decoration: line-through; }
-.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #3a1f1f; border: 1px solid var(--bad); padding: 8px 14px; border-radius: 8px; z-index: 20; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #3a1f1f; border: 1px solid var(--bad); padding: 8px 14px; border-radius: 8px; z-index: 20; max-width: 90vw; }
+.toast.info { background: #1d2a44; border-color: var(--accent); }
+#scope { width: auto; max-width: 55%; padding: 3px 8px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+#scope-state { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 11px; }
+#sup-stop { margin-left: auto; }
+.work-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--info); animation: pulse 1.2s infinite; }
+.chip.owns { color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 1000px) { main { grid-template-columns: 1fr; grid-auto-rows: 60vh; overflow-y: auto; } }

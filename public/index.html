@@ -9,8 +9,7 @@
 <body>
   <header>
     <h1>Agent Manager</h1>
-    <div id="sup-pill" class="pill idle"><span class="dot"></span><span id="sup-text">supervisor idle</span></div>
-    <button id="sup-stop" class="ghost small hidden">Stop turn</button>
+    <div id="sup-pill" class="pill idle"><span class="dot"></span><span id="sup-text">supervisors idle</span></div>
     <div class="spacer"></div>
     <div id="stats" class="muted"></div>
     <button id="new-task" class="primary">+ New task</button>
@@ -28,7 +27,7 @@
     </section>
 
     <section class="panel" id="chat-panel">
-      <h2>Supervisor</h2>
+      <h2>Chat <select id="scope" title="Each task has its own supervisor"></select><span id="scope-state" class="muted"></span><button id="sup-stop" class="ghost small hidden">Stop turn</button></h2>
       <div id="chat" class="scroll"></div>
       <form id="composer">
         <textarea id="msg" rows="2" placeholder="Message the supervisor…  (@a1 or @name to point at an agent · Enter to send, Shift+Enter for newline)"></textarea>
