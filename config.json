@@ -1,0 +1,9 @@
+{
+  "port": 4800,
+  "workspace": "workspace",
+  "claudeBin": "claude",
+  "model": null,
+  "maxConcurrentAgents": 5,
+  "permissionMode": "acceptEdits",
+  "allowedTools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"]
+}
