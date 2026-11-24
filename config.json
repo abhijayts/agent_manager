@@ -2,8 +2,10 @@
   "port": 4800,
   "workspace": "workspace",
   "claudeBin": "claude",
-  "model": null,
   "maxAgentsPerTask": 5,
   "permissionMode": "acceptEdits",
-  "allowedTools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch"]
+  "tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+  "supervisorModel": null,
+  "agentModel": null,
+  "generalModel": "haiku"
 }

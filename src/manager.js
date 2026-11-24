@@ -13,14 +13,24 @@ const config = {
   port: 4800,
   workspace: 'workspace',
   claudeBin: 'claude',
-  model: null,
   maxAgentsPerTask: 5,
   permissionMode: 'acceptEdits',
-  allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch'],
+  // Built-in tools every supervisor/agent gets. Keep this list SHORT: each extra tool schema is
+  // re-sent on every request. Web tools are opt-in per agent (spawn_subagent web:true).
+  tools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
+  supervisorModel: null, // null = CLI default
+  agentModel: null,
+  generalModel: 'haiku', // the read-only overview chat does not need a big model
   ...require('../config.json'),
 };
+// Env overrides, for running an isolated second instance (also used by tests).
+if (process.env.AGENT_MANAGER_PORT) config.port = Number(process.env.AGENT_MANAGER_PORT);
+if (process.env.AGENT_MANAGER_WORKSPACE) config.workspace = process.env.AGENT_MANAGER_WORKSPACE;
+const MODELS = ['haiku', 'sonnet', 'opus'];
+const WEB_TOOLS = ['WebFetch', 'WebSearch'];
+const GENERAL_TOOLS = ['Read', 'Glob', 'Grep'];
 const WORKSPACE = path.resolve(ROOT, config.workspace);
-const DATA = path.join(ROOT, 'data');
+const DATA = process.env.AGENT_MANAGER_DATA || path.join(ROOT, 'data');
 const GENERAL = 'general';
 
 const now = () => new Date().toISOString();
@@ -81,6 +91,20 @@ const rt = (scope) => {
 };
 const supState = (scope) => (state.supervisors[scope] ||= { sessionId: null, status: 'idle', since: null });
 
+// Token accounting. `result` events carry the usage of one whole run (all of its requests).
+// `in` counts everything sent to the model (fresh + cache writes + cache reads); `cost` is the
+// CLI's API-equivalent estimate (informational on a subscription).
+function addUsage(holder, ev) {
+  const u = ev.usage;
+  if (!u) return;
+  const t = (holder.usage ||= { in: 0, out: 0, cost: 0, runs: 0 });
+  t.in += (u.input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+  t.out += u.output_tokens || 0;
+  t.cost += ev.total_cost_usd || 0;
+  t.runs += 1;
+  changed();
+}
+
 function validScope(scope) {
   if (scope === GENERAL) return;
   const t = getTask(scope);
@@ -125,15 +149,17 @@ function pump(scope) {
     systemPromptFile: promptFile,
     mcpConfigFile: mcpFile,
     permissionMode: config.permissionMode,
-    allowedTools: scope === GENERAL ? ['mcp__manager', 'Read', 'Glob', 'Grep'] : [...config.allowedTools, 'mcp__manager'],
+    tools: scope === GENERAL ? GENERAL_TOOLS : config.tools,
+    allowedTools: [...(scope === GENERAL ? GENERAL_TOOLS : config.tools), 'mcp__manager'],
     disallowedTools: ['Task', 'Agent'],
-    model: config.model,
+    model: scope === GENERAL ? config.generalModel : config.supervisorModel,
     onEvent(ev) {
       if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) {
         st.sessionId = ev.session_id;
         changed();
-      } else if (ev.type === 'result' && ev.is_error) {
-        addChat(scope, 'system', `Supervisor error: ${String(ev.result || ev.subtype).slice(0, 500)}`);
+      } else if (ev.type === 'result') {
+        addUsage(st, ev);
+        if (ev.is_error) addChat(scope, 'system', `Supervisor error: ${String(ev.result || ev.subtype).slice(0, 500)}`);
       }
       for (const e of toLogEntries(ev)) addChat(scope, e.kind === 'text' ? 'supervisor' : e.kind, e.text);
     },
@@ -358,15 +384,21 @@ function checkClaims(owns, exceptAgentId) {
   }
 }
 
-function spawnAgent({ taskId, name, objective, instructions, owns }) {
-  const task = mustTask(taskId);
-  const scope = rootOf(task).id;
-  if (!planApproved(task)) fail(`Plan gate: ${scope} has no approved plan. No agents can start.`);
-  if (['done', 'cancelled', 'failed'].includes(task.status)) fail(`${task.id} is ${task.status}; reopen it with update_task first.`);
+// `subtask` (optional title) creates a subtask under taskId and assigns the agent to it in the same
+// call, which saves the supervisor a separate create_task round trip (each round trip re-reads its context).
+function spawnAgent({ taskId, name, objective, instructions, owns, model, web, subtask }) {
+  const base = mustTask(taskId);
+  if (model && !MODELS.includes(model)) fail(`model must be one of: ${MODELS.join(', ')}`);
+  const scope = rootOf(base).id;
+  if (!planApproved(base)) fail(`Plan gate: ${scope} has no approved plan. No agents can start.`);
+  if (['done', 'cancelled', 'failed'].includes(base.status)) fail(`${base.id} is ${base.status}; reopen it with update_task first.`);
   if (!objective?.trim()) fail('objective is required');
   if (runningFor(scope).length >= config.maxAgentsPerTask) fail(`At most ${config.maxAgentsPerTask} agents of ${scope} may run at once. Wait for one to finish.`);
   const claims = normalizeOwns(owns);
   checkClaims(claims, null);
+  // all validation passed: only now create the subtask, so a rejected spawn leaves no orphan
+  const task = subtask?.trim() ? createTask({ title: subtask, prompt: objective, parentId: base.id }) : base;
+  if (['new', 'ready'].includes(base.status)) base.status = 'in_progress';
   let nm = (name || 'agent').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '') || 'agent';
   if (findAgent(nm) && !/^a\d+$/.test(nm)) nm = `${nm}-${state.seq.agent + 1}`;
   if (/^a\d+$/.test(nm)) nm = `worker-${state.seq.agent + 1}`;
@@ -376,6 +408,8 @@ function spawnAgent({ taskId, name, objective, instructions, owns }) {
     taskId: task.id,
     objective: objective.trim(),
     owns: claims,
+    model: model || config.agentModel || null,
+    web: !!web,
     status: 'starting',
     sessionId: null,
     activity: 'starting…',
@@ -408,6 +442,7 @@ function startAgentRun(agent, prompt) {
   let isError = false;
   pushLog(agent, { kind: 'input', text: prompt.slice(0, 1500) });
   changed();
+  const agentTools = [...config.tools, ...(agent.web ? WEB_TOOLS : [])];
   const child = runClaude({
     bin: config.claudeBin,
     cwd: WORKSPACE,
@@ -416,14 +451,16 @@ function startAgentRun(agent, prompt) {
     systemPromptFile: promptFile,
     mcpConfigFile: mcpFile,
     permissionMode: config.permissionMode,
-    allowedTools: [...config.allowedTools, 'mcp__me'],
+    tools: agentTools,
+    allowedTools: [...agentTools, 'mcp__me'],
     disallowedTools: ['Task', 'Agent'],
-    model: config.model,
+    model: agent.model,
     onEvent(ev) {
       if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id) agent.sessionId = ev.session_id;
       else if (ev.type === 'result') {
         finalResult = ev.result;
         isError = !!ev.is_error;
+        addUsage(agent, ev);
       }
       for (const e of toLogEntries(ev)) pushLog(agent, e);
       changed();
@@ -438,7 +475,7 @@ function startAgentRun(agent, prompt) {
       pushLog(agent, { kind: ok ? 'result' : 'error', text: agent.report.slice(0, 4000) });
       changed();
       if (agent.status !== 'stopped' || !agent.stopQuiet) {
-        wakeSupervisor(scope, `Agent ${agent.id} "${agent.name}" on ${agent.taskId} ${agent.status.toUpperCase()}.\nReport:\n${agent.report.slice(0, 6000)}`);
+        wakeSupervisor(scope, `Agent ${agent.id} "${agent.name}" on ${agent.taskId} ${agent.status.toUpperCase()}.\nReport:\n${agent.report.slice(0, 2500)}`);
       }
     },
   });
@@ -505,7 +542,7 @@ function snapshot({ withChat = false } = {}) {
   const supervisors = {};
   for (const scope of [GENERAL, ...state.tasks.filter((t) => !t.parentId).map((t) => t.id)]) {
     const s = supState(scope);
-    supervisors[scope] = { status: s.status, since: s.since, queued: rt(scope).queue.length };
+    supervisors[scope] = { status: s.status, since: s.since, queued: rt(scope).queue.length, usage: s.usage || null };
   }
   const s = {
     tasks: state.tasks,

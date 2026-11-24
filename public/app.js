@@ -31,6 +31,10 @@
   const isLive = (a) => a.status === 'running' || a.status === 'starting';
   const avatar = (a, size = '') => `<div class="avatar ${size} ${isLive(a) ? 'live' : ''}" style="--h:${hue(a.name)}">${esc(a.name.charAt(0))}</div>`;
   const typing = '<span class="typing"><i></i><i></i><i></i></span>';
+  // token accounting (usage = { in, out, cost, runs }; `in` = everything sent to the model across all requests)
+  const tok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n || 0));
+  const usageTotal = (...us) => us.reduce((t, u) => ({ in: t.in + (u?.in || 0), out: t.out + (u?.out || 0), cost: t.cost + (u?.cost || 0) }), { in: 0, out: 0, cost: 0 });
+  const usageChip = (u, extra = '') => (u && u.in ? `<span class="chip tokens" title="${esc(`${u.in.toLocaleString()} input + ${u.out.toLocaleString()} output tokens · ≈$${u.cost.toFixed(3)} at API prices${extra}`)}">⛁ ${tok(u.in + u.out)}</span>` : '');
   const empty = (icon, html) => `<div class="empty"><b>${icon}</b>${html}</div>`;
   // Only touch the DOM when the markup really changed: keeps hover/scroll state and avoids flicker.
   const setHtml = (el, html) => {
@@ -146,7 +150,9 @@
     const live = S.agents.filter(isLive);
     const liveTasks = new Set(live.map(scopeOfAgent)).size;
     const open = S.tasks.filter((t) => !t.parentId && !['done', 'failed', 'cancelled'].includes(t.status)).length;
-    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}`;
+    const all = usageTotal(...Object.values(S.supervisors || {}).map((s) => s.usage), ...S.agents.map((a) => a.usage));
+    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}${all.in ? ` · ⛁ ${tok(all.in + all.out)} tokens` : ''}`;
+    $('#stats').title = all.in ? `All supervisors and agents so far: ${all.in.toLocaleString()} input + ${all.out.toLocaleString()} output tokens (≈$${all.cost.toFixed(2)} at API prices; informational on a subscription)` : '';
   }
 
   // ---------- explorer (navigates across ALL tasks) ----------
@@ -201,7 +207,7 @@
     const plan = t.plan;
     return `<div class="phead"><div class="avatar" style="--h:${hue(t.id)}">${esc(t.id)}</div>
       <div class="grow"><h3>${esc(t.title)}</h3>
-        <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓ approved' : '… needs approval') : '— none'}</span>${agents.length ? `<span class="chip">${agents.filter(isLive).length}/${agents.length} agents running</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}<span>created ${ago(t.createdAt)} ago</span></div></div>
+        <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓ approved' : '… needs approval') : '— none'}</span>${agents.length ? `<span class="chip">${agents.filter(isLive).length}/${agents.length} agents running</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}${usageChip(usageTotal(sup(t.id).usage, ...agents.map((a) => a.usage)), ` · supervisor ${tok(usageTotal(sup(t.id).usage).in + usageTotal(sup(t.id).usage).out)}, agents ${tok(usageTotal(...agents.map((a) => a.usage)).in + usageTotal(...agents.map((a) => a.usage)).out)}`)}<span>created ${ago(t.createdAt)} ago</span></div></div>
       <div class="actions">${plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}${!['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}</div></div>`;
   }
   function tabsHtml() {
@@ -278,7 +284,7 @@
           (a) => `<div class="rcard" data-nav="${scopeOfAgent(a)}/agent/${a.id}">${avatar(a)}<div class="grow">
           <div class="row"><span class="title grow">${esc(a.name)}</span>${badge(a.status)}</div>
           <div class="activity">${isLive(a) ? typing : ''}<span class="title">${esc(a.activity || '')}</span></div>
-          <div class="meta"><span class="chip owns">${a.owns?.length ? 'writes ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span></div>
+          <div class="meta"><span class="chip owns">${a.owns?.length ? 'writes ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span>${a.model ? `<span class="chip">${esc(a.model)}</span>` : ''}${usageChip(a.usage)}</div>
           ${todoSummary(a)}</div></div>`
         )
         .join('')
@@ -425,7 +431,7 @@
     const html = `<div class="ahero">${avatar(a, 'lg')}
         <div class="grow">
           <div class="row" style="gap:10px"><h3>${esc(a.name)}</h3><span class="id">${a.id}</span>${badge(a.status)}</div>
-          <div class="sub"><span class="chip" data-nav="${nav.scope}/${a.taskId === nav.scope ? 'overview' : 'sub/' + a.taskId}">${esc(a.taskId)}${task ? ' · ' + esc(task.title.slice(0, 40)) : ''}</span><span>started ${ago(a.startedAt)} ago</span><span class="chip" id="agent-dur"></span></div>
+          <div class="sub"><span class="chip" data-nav="${nav.scope}/${a.taskId === nav.scope ? 'overview' : 'sub/' + a.taskId}">${esc(a.taskId)}${task ? ' · ' + esc(task.title.slice(0, 40)) : ''}</span><span>started ${ago(a.startedAt)} ago</span><span class="chip" id="agent-dur"></span><span class="chip">${esc(a.model || 'default model')}</span><span id="agent-tok"></span>${a.web ? '<span class="chip">web</span>' : ''}</div>
           <div class="activity" id="agent-activity"></div>
         </div>${live ? `<button class="danger" data-stop="${a.id}">Stop agent</button>` : ''}</div>
       <div class="seg"><button class="${agentTab === 'overview' ? 'on' : ''}" data-tab="overview">Overview</button><button class="${agentTab === 'activity' ? 'on' : ''}" data-tab="activity">Activity <span class="count" id="act-count"></span></button></div>
@@ -436,6 +442,7 @@
     setHtml($('#agent-activity'), `${live ? typing : ''}<span class="title">${esc(a.activity || '')}</span>`);
     const d = $('#agent-dur');
     if (d) d.textContent = dur(a);
+    setHtml($('#agent-tok'), usageChip(a.usage) || '<span class="chip tokens">⛁ …</span>');
     const c = $('#act-count');
     if (c) c.textContent = agentLog.length;
   }

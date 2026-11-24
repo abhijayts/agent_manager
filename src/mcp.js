@@ -85,16 +85,19 @@ function supervisorServer(scope) {
     'spawn_subagent',
     'Start a subagent (separate Claude Code process) on a task or subtask. Rejected unless the plan is approved, or if "owns" overlaps a running agent. The agent does not see the chat: the objective must be self-contained. Returns immediately; you will be woken when it finishes.',
     {
-      task_id: z.string(),
+      task_id: z.string().describe(`the task or subtask to attach to (usually ${scope})`),
+      subtask: z.string().optional().describe('short title: creates a subtask under task_id and assigns this agent to it in the same call (preferred over a separate create_task)'),
       name: z.string().describe('short kebab-case label, e.g. api-builder'),
       objective: z.string(),
       owns: z.array(z.string()).describe('workspace-relative files/folders this agent may WRITE. Use [] for a read-only agent. Must not overlap any running agent.'),
       instructions: z.string().optional(),
+      model: z.enum(['haiku', 'sonnet', 'opus']).optional().describe('haiku = trivial/mechanical work (about 3x cheaper); sonnet = normal work (default); opus = hard reasoning or high-accuracy review only'),
+      web: z.boolean().optional().describe('give this agent WebSearch/WebFetch. Off by default because the tool definitions cost tokens on every request'),
     },
-    ({ task_id, name, objective, instructions, owns }) => {
+    ({ task_id, subtask, name, objective, instructions, owns, model, web }) => {
       m.taskInScope(scope, task_id);
-      const a = m.spawnAgent({ taskId: task_id, name, objective, instructions, owns });
-      return { id: a.id, name: a.name, task: a.taskId, status: a.status, owns: a.owns };
+      const a = m.spawnAgent({ taskId: task_id, subtask, name, objective, instructions, owns, model, web });
+      return { id: a.id, name: a.name, task: a.taskId, status: a.status, owns: a.owns, model: a.model || 'default' };
     }
   );
 

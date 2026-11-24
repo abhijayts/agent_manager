@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 
-const FILE = path.join(__dirname, '..', 'data', 'state.json');
+// AGENT_MANAGER_DATA lets you run a second, isolated instance (own state, prompts, MCP configs).
+const FILE = path.join(process.env.AGENT_MANAGER_DATA || path.join(__dirname, '..', 'data'), 'state.json');
 const bus = new EventEmitter(); // 'changed' | 'chat' (entry) | 'log' ({agentId, entry})
 
 const state = {

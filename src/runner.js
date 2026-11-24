@@ -13,6 +13,12 @@ function runClaude(opts) {
   if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode);
   if (opts.systemPromptFile) args.push('--append-system-prompt-file', opts.systemPromptFile);
   if (opts.mcpConfigFile) args.push('--mcp-config', opts.mcpConfigFile, '--strict-mcp-config');
+  // Token savers (measured): shipping all ~30 built-in tool schemas costs ~24k input tokens on every
+  // request; --tools restricts that to what we need. Project-only settings keep the user's personal
+  // hooks/plugins out of headless runs. The dynamic-sections flag keeps the prompt prefix identical
+  // across runs so the prompt cache can be shared.
+  if (opts.tools?.length) args.push('--tools', opts.tools.join(','));
+  args.push('--setting-sources', 'project', '--exclude-dynamic-system-prompt-sections');
   if (opts.disallowedTools?.length) args.push('--disallowedTools', opts.disallowedTools.join(','));
   // variadic flag: keep it last. The prompt goes via stdin, so nothing follows it.
   if (opts.allowedTools?.length) args.push('--allowedTools', opts.allowedTools.join(','));

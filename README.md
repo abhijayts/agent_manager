@@ -32,9 +32,24 @@ Needs Node 20+ and the `claude` CLI on PATH, already logged in.
 | --- | --- |
 | `workspace` | folder where all supervisors and agents work (default `./workspace`) |
 | `permissionMode` | `acceptEdits` by default; headless agents cannot answer prompts |
-| `allowedTools` | tools agents may use without asking. `Bash` makes this effectively full access to your user account |
+| `tools` | built-in tools every supervisor/agent gets (default: Bash, Read, Write, Edit, Glob, Grep). `Bash` makes this effectively full access to your user account. Keep it short: see *Token usage* |
 | `maxAgentsPerTask` | cap on agents running at once for ONE task (there is no global cap) |
-| `model` | optional model override |
+| `supervisorModel`, `agentModel` | model for task supervisors / default for agents (`null` = CLI default). A supervisor can still pick `haiku`/`sonnet`/`opus` per agent |
+| `generalModel` | model for the read-only General chat (default `haiku`) |
+
+Environment overrides (to run a second, isolated instance): `AGENT_MANAGER_DATA`, `AGENT_MANAGER_PORT`, `AGENT_MANAGER_WORKSPACE`.
+
+## Token usage
+
+Every request re-sends the whole context, and every `claude` process starts cold, so the defaults are tuned for it (measured on a trivial "introduce yourself" run):
+
+- **Only 6 built-in tools** (`--tools`). Claude Code ships ~30 tool schemas; sending them cost ~24k input tokens on *every* request (33k down to 9k for a one-request agent). Web tools are opt-in per agent (`web: true`).
+- **Headless runs ignore your personal hooks/plugins** (`--setting-sources project`) and share a stable prompt prefix for caching (`--exclude-dynamic-system-prompt-sections`).
+- **Cheapest model that works.** Supervisors choose `haiku` for trivial work, `sonnet` by default, `opus` only for hard or high-accuracy jobs; General chat runs on Haiku.
+- **Fewer round trips.** `spawn_subagent` creates the subtask itself (no separate `create_task`), agents skip their checklist on 1-2 step jobs, and reports are capped at ~100 words.
+- **See it.** Token totals show in the header, on each task, and on each agent (hover for the split and the API-equivalent cost, which is informational on a subscription).
+
+A 3-agent "introduce yourself" scenario went from roughly 450k+ input tokens to about 84k.
 
 State lives in `data/state.json` (gitignored). Agents running when the server stops are marked interrupted on the next start.
 

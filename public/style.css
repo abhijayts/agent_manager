@@ -318,3 +318,4 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(250px
 .subrow { cursor: pointer; transition: background 0.15s; }
 .subrow:hover { background: rgba(255, 255, 255, 0.09); }
 .inline-actions { display: flex; gap: 8px; margin-top: 10px; }
+.chip.tokens { color: #ffd98a; border-color: rgba(251, 191, 36, 0.28); background: rgba(251, 191, 36, 0.08); }
