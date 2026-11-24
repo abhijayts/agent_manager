@@ -21,23 +21,15 @@
   </header>
 
   <main>
-    <section class="panel" id="tasks-panel">
-      <h2>Tasks <span class="count" id="tasks-count"></span></h2>
-      <div id="tasks" class="scroll"></div>
-    </section>
+    <aside class="panel" id="explorer">
+      <h2>Explorer <span class="count" id="tasks-count"></span><button id="collapse-all" class="ghost small" title="Collapse all tasks">Collapse all</button></h2>
+      <div id="tree" class="tree"></div>
+    </aside>
 
-    <section class="panel" id="agents-panel">
-      <h2>Agents <span class="count" id="agents-count"></span><span class="hint">read-only · talk to a supervisor</span></h2>
-      <div id="agents" class="scroll"></div>
-    </section>
-
-    <section class="panel" id="chat-panel">
-      <h2>Chat <select id="scope" title="Each task has its own supervisor"></select><span id="scope-state" class="muted"></span><button id="sup-stop" class="ghost small hidden">Stop turn</button></h2>
-      <div id="chat" class="scroll"></div>
-      <form id="composer">
-        <textarea id="msg" rows="1" placeholder="Message the supervisor…"></textarea>
-        <button class="primary" type="submit" title="Send"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10l14-7-5 14-2.5-5.5z"/></svg></button>
-      </form>
+    <section class="panel" id="main">
+      <div id="pane-head"></div>
+      <div id="pane-tabs"></div>
+      <div id="pane-body" class="pane-body"></div>
     </section>
   </main>
 

@@ -14,7 +14,8 @@ Needs Node 20+ and the `claude` CLI on PATH, already logged in.
 
 ## How it works
 
-- **One supervisor per task.** Every top-level task gets its own supervisor (own Claude session, own chat, own agent pool). Tasks run fully in parallel. Pick a chat with the selector on the right, or the *chat* button on a task card. A **General overview** chat is a read-only assistant for questions about everything ("what is running?").
+- **Explorer layout.** The left explorer navigates *across* tasks: a task expands into its Supervisor, Overview (plan), subtasks and, under each, the agents. The big main pane navigates only *within* the selected task, with tabs for Supervisor, Overview and each of its agents. The Supervisor page is the chat plus a live roster of that task's subagents. Every page has a URL (`#/T1/chat`, `#/T1/overview`, `#/T1/agent/a2`, `#/T1/sub/T3`, `#/general`), so Back/Forward and refresh work.
+- **One supervisor per task.** Every top-level task gets its own supervisor (own Claude session, own chat, own agent pool). Tasks run fully in parallel. A **General overview** chat (top of the explorer) is a read-only assistant for questions about everything ("what is running?").
 - **You talk only to supervisors.** `@a1` or `@agent-name` attaches that agent's status and recent activity to your message (scoped to that task's agents).
 - **New task** gives a supervisor a prompt, plus optionally a plan, open points and a number of agents.
 - **No plan, no work.** If you supply no plan, the supervisor drafts one and waits for you to click *Approve plan*. The server rejects status changes and agent spawns for any task without an approved plan (enforced in code, not only in the prompt).

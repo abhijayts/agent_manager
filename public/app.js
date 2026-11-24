@@ -1,19 +1,26 @@
 (() => {
   const $ = (s) => document.querySelector(s);
-  let S = { tasks: [], agents: [], supervisors: { general: { status: 'idle' } }, config: {} };
-  const chat = []; // every scope; the panel shows only the selected one
-  let scope = localStorage.getItem('scope') || 'general';
-  const unread = {};
-  const sup = (id) => S.supervisors?.[id] || { status: 'idle' };
-  let openView = null; // { type: 'task'|'agent'|'new', id }
-  let agentLog = []; // log of the agent drawer that is currently open
 
+  // ---------- state ----------
+  let S = { tasks: [], agents: [], supervisors: { general: { status: 'idle' } }, config: {} };
+  const chat = []; // every scope; the main pane shows only the open one
+  const unread = {}; // scope -> count of unseen supervisor messages
+  const sup = (id) => S.supervisors?.[id] || { status: 'idle' };
+  const expanded = new Set(JSON.parse(localStorage.getItem('expanded') || '[]'));
+  const saveExpanded = () => localStorage.setItem('expanded', JSON.stringify([...expanded]));
+  let nav = { scope: 'general', view: 'chat' }; // view: chat | overview | agent | sub
+  let navKey = '';
+  let agentLog = [];
+  let agentTab = 'overview';
+
+  // ---------- helpers ----------
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const badge = (s) => `<span class="badge s-${esc(s)}">${esc(String(s).replace('_', ' '))}</span>`;
+  const sdot = (s) => `<i class="sdot s-${esc(s)}"></i>`;
   const ago = (iso) => {
     if (!iso) return '';
     const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
-    return s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+    return s < 60 ? `${Math.floor(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
   };
   const clock = (iso) => new Date(iso).toLocaleTimeString([], { hour12: false });
   function dur(a) {
@@ -25,12 +32,21 @@
   const avatar = (a, size = '') => `<div class="avatar ${size} ${isLive(a) ? 'live' : ''}" style="--h:${hue(a.name)}">${esc(a.name.charAt(0))}</div>`;
   const typing = '<span class="typing"><i></i><i></i><i></i></span>';
   const empty = (icon, html) => `<div class="empty"><b>${icon}</b>${html}</div>`;
-  // Only touch the DOM when markup really changed: keeps hover/scroll state and avoids flicker.
+  // Only touch the DOM when the markup really changed: keeps hover/scroll state and avoids flicker.
   const setHtml = (el, html) => {
-    if (el._html !== html) {
-      el._html = html;
-      el.innerHTML = html;
-    }
+    if (!el) return false;
+    if (el._html === html) return false;
+    el._html = html;
+    el.innerHTML = html;
+    return true;
+  };
+  const svg = (p) => `<svg class="ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
+  const ic = {
+    chat: svg('<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>'),
+    doc: svg('<path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3M6 8h4M6 10.5h4"/>'),
+    task: svg('<rect x="2.5" y="2.5" width="11" height="11" rx="2.5"/><path d="M5.5 8.2l1.8 1.8 3.2-3.5"/>'),
+    globe: svg('<circle cx="8" cy="8" r="5.5"/><path d="M2.5 8h11M8 2.5c2 2 2 9 0 11M8 2.5c-2 2-2 9 0 11"/>'),
+    chev: svg('<path d="M6 4l4 4-4 4"/>'),
   };
   function md(text) {
     let out = esc(text);
@@ -55,82 +71,219 @@
     return data;
   }
 
-  // ---------- header ----------
-  function renderHeader() {
-    const workingN = Object.values(S.supervisors || {}).filter((s) => s.status === 'working').length;
-    $('#sup-pill').className = 'pill ' + (workingN ? 'working' : 'idle');
-    $('#sup-text').textContent = workingN ? `${workingN} supervisor${workingN > 1 ? 's' : ''} working` : 'supervisors idle';
-    const live = S.agents.filter((a) => ['running', 'starting'].includes(a.status));
-    const liveTasks = new Set(live.map((a) => rootOf(S.tasks.find((t) => t.id === a.taskId) || { id: a.taskId }).id)).size;
-    const open = S.tasks.filter((t) => !t.parentId && !['done', 'failed', 'cancelled'].includes(t.status)).length;
-    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}`;
-  }
-
-  // ---------- tasks ----------
-  const rootOf = (t) => (t.parentId ? S.tasks.find((x) => x.id === t.parentId) || t : t);
+  // ---------- model helpers ----------
+  const getTask = (id) => S.tasks.find((t) => t.id === id);
+  const rootOf = (t) => {
+    let x = t;
+    for (let i = 0; x.parentId && i < 20; i++) x = getTask(x.parentId) || x;
+    return x;
+  };
+  const scopeOfAgent = (a) => {
+    const t = getTask(a.taskId);
+    return t ? rootOf(t).id : a.taskId;
+  };
+  const agentsIn = (scope) => S.agents.filter((a) => scopeOfAgent(a) === scope);
+  const familyOf = (rootId) => S.tasks.filter((t) => t.id !== rootId && rootOf(t).id === rootId);
   function taskProgress(t) {
     const kids = S.tasks.filter((x) => x.parentId === t.id);
-    if (!kids.length) return null;
-    return { done: kids.filter((k) => k.status === 'done').length, total: kids.length };
+    return kids.length ? { done: kids.filter((k) => k.status === 'done').length, total: kids.length } : null;
   }
-  function renderTasks() {
-    const el = $('#tasks');
-    $('#tasks-count').textContent = S.tasks.length || '';
-    if (!S.tasks.length) {
-      setHtml(el, empty('✦', 'No tasks yet.<br>Click “New task” to give a supervisor something to do.'));
-      return;
-    }
-    const roots = S.tasks.filter((t) => !t.parentId).reverse();
-    const card = (t, sub) => {
-      const needsApproval = t.status === 'awaiting_approval';
-      const prog = taskProgress(t);
-      const planBadge = sub ? '' : t.plan ? (t.plan.approved ? '<span class="chip">plan ✓</span>' : '<span class="chip warn">plan needs your approval</span>') : '<span class="chip">no plan</span>';
-      const agents = t.agentIds.map((id) => `<span class="chip">${esc(id)}</span>`).join('');
-      const working = !sub && sup(t.id).status === 'working' ? '<span class="work-dot" title="its supervisor is working"></span>' : '';
-      const chatBtn = sub ? '' : `<button class="ghost small" data-chat="${t.id}">${unread[t.id] ? '● ' : ''}chat</button>`;
-      return `<div class="card task s-${t.status} ${sub ? 'sub' : ''}" data-task="${t.id}">
-        <div class="row"><span class="id">${t.id}</span><span class="title grow">${esc(t.title)}</span>${working}${badge(t.status)}</div>
-        <div class="meta">${planBadge}${agents}${prog ? `<span>${prog.done}/${prog.total} subtasks</span>` : ''}${needsApproval ? `<button class="primary small" data-approve="${t.id}">Approve plan</button>` : ''}<span class="grow"></span>${chatBtn}</div>
-        ${prog ? `<div class="bar"><i style="width:${(prog.done / prog.total) * 100}%"></i></div>` : ''}
-      </div>`;
-    };
-    setHtml(el, roots.map((r) => card(r, false) + S.tasks.filter((k) => k.parentId === r.id).map((k) => card(k, true)).join('')).join(''));
-  }
-
-  // ---------- agents ----------
   function todoSummary(a) {
     if (!a.todos?.length) return '';
     const done = a.todos.filter((t) => t.status === 'done').length;
     const cur = a.todos.find((t) => t.status === 'in_progress');
     return `<div class="todo-line">☑ ${done}/${a.todos.length}${cur ? ' · ' + esc(cur.text) : ''}</div><div class="bar"><i style="width:${(done / a.todos.length) * 100}%"></i></div>`;
   }
-  function renderAgents() {
-    const el = $('#agents');
-    $('#agents-count').textContent = S.agents.length || '';
-    if (!S.agents.length) {
-      setHtml(el, empty('◎', 'No agents yet.<br>Supervisors spawn them when a task needs parallel work. Easy tasks they do themselves.'));
-      return;
+
+  // ---------- routing (#/T1/chat, #/T1/overview, #/T1/agent/a2, #/T1/sub/T3, #/general) ----------
+  function parseHash() {
+    const p = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+    if (!p.length) return null;
+    if (p[0].toLowerCase() === 'general') return { scope: 'general', view: 'chat' };
+    const scope = p[0].toUpperCase();
+    const root = S.tasks.find((t) => t.id === scope && !t.parentId);
+    if (!root) return null;
+    const view = p[1] || 'chat';
+    if (view === 'overview') return { scope, view };
+    if (view === 'agent') {
+      const a = S.agents.find((x) => x.id === (p[2] || '').toLowerCase());
+      if (a && scopeOfAgent(a) === scope) return { scope, view, id: a.id };
     }
+    if (view === 'sub') {
+      const s = S.tasks.find((t) => t.id === (p[2] || '').toUpperCase());
+      if (s && s.parentId && rootOf(s).id === scope) return { scope, view, id: s.id };
+    }
+    return { scope, view: 'chat' };
+  }
+  const pathOf = (n) => (n.scope === 'general' ? 'general' : [n.scope, n.view, n.id].filter(Boolean).join('/'));
+  function go(path) {
+    if (location.hash === '#/' + path) route();
+    else location.hash = '#/' + path;
+  }
+  function route() {
+    const n = parseHash() || { scope: 'general', view: 'chat' };
+    const key = pathOf(n);
+    if (key === navKey) return updateView();
+    nav = n;
+    navKey = key;
+    localStorage.setItem('nav', key);
+    if (n.scope !== 'general') {
+      expanded.add(n.scope);
+      saveExpanded();
+    }
+    if (n.view === 'chat') unread[n.scope] = 0;
+    mountView();
+    renderTree();
+    updateView();
+  }
+  window.addEventListener('hashchange', route);
+
+  // ---------- header ----------
+  function renderHeader() {
+    const workingN = Object.values(S.supervisors || {}).filter((s) => s.status === 'working').length;
+    $('#sup-pill').className = 'pill ' + (workingN ? 'working' : 'idle');
+    $('#sup-text').textContent = workingN ? `${workingN} supervisor${workingN > 1 ? 's' : ''} working` : 'supervisors idle';
+    const live = S.agents.filter(isLive);
+    const liveTasks = new Set(live.map(scopeOfAgent)).size;
+    const open = S.tasks.filter((t) => !t.parentId && !['done', 'failed', 'cancelled'].includes(t.status)).length;
+    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}`;
+  }
+
+  // ---------- explorer (navigates across ALL tasks) ----------
+  function row({ depth = 0, to, cls = '', toggle = null, open = false, icon = '', label, trail = '', sel = false, title = '' }) {
+    const chev = toggle ? `<span class="chev ${open ? 'open' : ''}" data-toggle="${toggle}">${ic.chev}</span>` : '<span class="chev none"></span>';
+    return `<div class="tr ${cls} ${sel ? 'sel' : ''}" style="--d:${depth}" data-nav="${to}" title="${esc(title)}">${chev}${icon}<span class="lbl">${label}</span>${trail}</div>`;
+  }
+  function treeHtml() {
+    const out = [];
+    out.push(row({ to: 'general', icon: ic.globe, label: 'General overview', trail: sup('general').status === 'working' ? '<span class="work-dot"></span>' : '', sel: nav.scope === 'general' }));
+    const roots = S.tasks.filter((t) => !t.parentId).reverse();
+    out.push('<div class="tree-sep"></div>');
+    if (!roots.length) out.push('<div class="tree-empty">No tasks yet. Click “New task”.</div>');
+    for (const t of roots) {
+      const open = expanded.has(t.id);
+      const here = nav.scope === t.id;
+      const trail = [
+        sup(t.id).status === 'working' ? '<span class="work-dot" title="supervisor working"></span>' : '',
+        t.status === 'awaiting_approval' ? '<span class="chip warn tiny">approve</span>' : '',
+        unread[t.id] ? '<span class="unread" title="new message"></span>' : '',
+        sdot(t.status),
+      ].join('');
+      out.push(row({ to: `${t.id}/chat`, cls: `task s-${t.status} ${here ? 'in' : ''}`, toggle: t.id, open, icon: ic.task, label: `<span class="id">${t.id}</span><span class="t">${esc(t.title)}</span>`, trail, title: t.title }));
+      if (!open) continue;
+      out.push(row({ depth: 1, to: `${t.id}/chat`, icon: ic.chat, label: 'Supervisor', trail: unread[t.id] ? '<span class="unread"></span>' : sup(t.id).status === 'working' ? '<span class="work-dot"></span>' : '', sel: here && nav.view === 'chat' }));
+      out.push(row({ depth: 1, to: `${t.id}/overview`, icon: ic.doc, label: 'Overview · plan', sel: here && nav.view === 'overview' }));
+      const agentRow = (a, depth) => row({ depth, to: `${t.id}/agent/${a.id}`, icon: avatar(a, 'xs'), label: esc(a.name), trail: `${isLive(a) ? typing : ''}${sdot(a.status)}`, sel: here && nav.view === 'agent' && nav.id === a.id, title: `${a.id} · ${a.status}` });
+      for (const k of familyOf(t.id)) {
+        out.push(row({ depth: 1, to: `${t.id}/sub/${k.id}`, cls: `s-${k.status}`, icon: ic.task, label: `<span class="id">${k.id}</span>${esc(k.title)}`, trail: sdot(k.status), sel: here && nav.view === 'sub' && nav.id === k.id, title: k.title }));
+        for (const a of S.agents.filter((x) => x.taskId === k.id)) out.push(agentRow(a, 2));
+      }
+      for (const a of S.agents.filter((x) => x.taskId === t.id)) out.push(agentRow(a, 1));
+    }
+    return out.join('');
+  }
+  function renderTree() {
+    const tree = $('#tree');
+    $('#tasks-count').textContent = S.tasks.filter((t) => !t.parentId).length || '';
+    const top = tree.scrollTop;
+    if (setHtml(tree, treeHtml())) tree.scrollTop = top;
+  }
+
+  // ---------- main pane: header + tabs (scoped to ONE task) ----------
+  function headHtml() {
+    if (nav.scope === 'general') {
+      return `<div class="phead"><div class="avatar" style="--h:250">${ic.globe}</div><div class="grow"><h3>General overview</h3><div class="sub">Read-only assistant for the whole picture · each task has its own supervisor in the explorer</div></div></div>`;
+    }
+    const t = getTask(nav.scope);
+    if (!t) return '';
+    const agents = agentsIn(t.id);
+    const prog = taskProgress(t);
+    const plan = t.plan;
+    return `<div class="phead"><div class="avatar" style="--h:${hue(t.id)}">${esc(t.id)}</div>
+      <div class="grow"><h3>${esc(t.title)}</h3>
+        <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓ approved' : '… needs approval') : '— none'}</span>${agents.length ? `<span class="chip">${agents.filter(isLive).length}/${agents.length} agents running</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}<span>created ${ago(t.createdAt)} ago</span></div></div>
+      <div class="actions">${plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}${!['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}</div></div>`;
+  }
+  function tabsHtml() {
+    if (nav.scope === 'general') return '';
+    const s = nav.scope;
+    const tab = (to, inner, on) => `<button class="ptab ${on ? 'on' : ''}" data-nav="${to}">${inner}</button>`;
+    let h = tab(`${s}/chat`, `${ic.chat}Supervisor${unread[s] ? '<span class="unread"></span>' : sup(s).status === 'working' ? '<span class="work-dot"></span>' : ''}`, nav.view === 'chat');
+    h += tab(`${s}/overview`, `${ic.doc}Overview`, nav.view === 'overview');
+    const agents = agentsIn(s);
+    if (agents.length) h += '<span class="sep"></span>';
+    for (const a of agents) h += tab(`${s}/agent/${a.id}`, `${avatar(a, 'xs')}${esc(a.name)}${sdot(a.status)}`, nav.view === 'agent' && nav.id === a.id);
+    if (nav.view === 'sub') h += '<span class="sep"></span>' + tab(pathOf(nav), `${ic.task}${esc(nav.id)}`, true);
+    return `<div class="ptabs">${h}</div>`;
+  }
+
+  // ---------- main pane: views ----------
+  const body = () => $('#pane-body');
+  function setBody(html) {
+    const b = body();
+    const top = b.scrollTop;
+    if (!setHtml(b, html)) return false;
+    b.scrollTop = top;
+    return true;
+  }
+
+  function mountView() {
+    const b = body();
+    b._html = null;
+    b.className = 'pane-body ' + nav.view;
+    b.scrollTop = 0;
+    if (nav.view === 'chat') {
+      b.innerHTML = `<div class="chatview"><div class="chatcol">
+          <div class="chat-top"><span class="muted" id="scope-state"></span><button id="sup-stop" class="ghost small hidden">Stop turn</button></div>
+          <div id="chat" class="scroll"></div>
+          <form id="composer"><textarea id="msg" rows="1"></textarea><button class="primary" type="submit" title="Send"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M3 10l14-7-5 14-2.5-5.5z"/></svg></button></form>
+        </div><aside class="rail" id="rail"></aside></div>`;
+      renderChatAll();
+      $('#msg').focus();
+    } else {
+      b.innerHTML = '';
+      if (nav.view === 'agent') {
+        agentLog = [];
+        agentTab = 'overview';
+        loadAgentLog(nav.id);
+      }
+    }
+  }
+
+  function updateView() {
+    if (nav.scope !== 'general' && !getTask(nav.scope)) return go('general'); // task vanished
+    setHtml($('#pane-head'), headHtml());
+    setHtml($('#pane-tabs'), tabsHtml());
+    if (nav.view === 'chat') {
+      setHtml($('#rail'), railHtml());
+      updateChatChrome();
+      updateThinking();
+    } else if (nav.view === 'overview') setBody(overviewHtml());
+    else if (nav.view === 'sub') setBody(subHtml());
+    else if (nav.view === 'agent') renderAgentView();
+  }
+
+  // ----- chat view -----
+  function railHtml() {
+    const general = nav.scope === 'general';
+    const list = general ? S.agents.filter(isLive) : agentsIn(nav.scope);
     const order = { running: 0, starting: 0, failed: 1, stopped: 2, done: 3 };
-    const list = [...S.agents].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.id.localeCompare(a.id, undefined, { numeric: true }));
-    setHtml(
-      el,
+    list.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.id.localeCompare(a.id, undefined, { numeric: true }));
+    const head = `<h5>${general ? 'Running now' : 'Subagents'} <span class="count">${list.length}</span></h5>`;
+    if (!list.length) return head + `<div class="muted">${general ? 'No agents are running.' : 'No subagents. Easy tasks are done by the supervisor itself.'}</div>`;
+    return (
+      head +
       list
-        .map((a) => `<div class="card agent s-${a.status}" data-agent="${a.id}">
-        ${avatar(a)}
-        <div class="grow">
-          <div class="row"><span class="title grow">${esc(a.name)}</span><span class="id">${a.id}</span>${badge(a.status)}</div>
-          <div class="meta" style="margin-top:3px"><span class="chip">${esc(a.taskId)}</span><span class="title">${esc((S.tasks.find((t) => t.id === a.taskId) || {}).title || '')}</span></div>
+        .map(
+          (a) => `<div class="rcard" data-nav="${scopeOfAgent(a)}/agent/${a.id}">${avatar(a)}<div class="grow">
+          <div class="row"><span class="title grow">${esc(a.name)}</span>${badge(a.status)}</div>
           <div class="activity">${isLive(a) ? typing : ''}<span class="title">${esc(a.activity || '')}</span></div>
-          <div class="meta"><span class="chip owns" title="paths this agent may write">${a.owns?.length ? 'writes ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span></div>
-          ${todoSummary(a)}
-        </div>
-      </div>`)
+          <div class="meta"><span class="chip owns">${a.owns?.length ? 'writes ' + esc(a.owns.map((p) => p || '.').join(', ')) : 'read-only'}</span></div>
+          ${todoSummary(a)}</div></div>`
+        )
         .join('')
     );
   }
-
-  // ---------- chat ----------
   function chatNode(e) {
     const d = document.createElement('div');
     d.className = 'msg ' + e.role;
@@ -142,181 +295,121 @@
   }
   function renderChatAll() {
     const el = $('#chat');
+    if (!el) return;
     el.innerHTML = '';
-    const mine = chat.filter((e) => e.scope === scope);
+    const mine = chat.filter((e) => e.scope === nav.scope);
     if (!mine.length) {
-      el.innerHTML = empty(scope === 'general' ? '◈' : '✉', scope === 'general' ? 'General overview: ask what is running, what is blocked, how a task is going.<br>Each task has its own supervisor chat (pick it above).' : 'No messages yet for this task.');
+      el.innerHTML = empty(nav.scope === 'general' ? '◈' : '✉', nav.scope === 'general' ? 'Ask what is running, what is blocked, how a task is going.<br>Open a task in the explorer to talk to its supervisor.' : 'No messages yet for this task.');
     }
     mine.forEach((e) => el.appendChild(chatNode(e)));
     el.scrollTop = el.scrollHeight;
+    updateChatChrome();
     updateThinking();
   }
   function appendChat(e) {
     chat.push(e);
-    if (e.scope !== scope) {
+    const visible = nav.view === 'chat' && e.scope === nav.scope && $('#chat');
+    if (!visible) {
       if (e.role === 'supervisor' && e.scope !== 'general') {
         unread[e.scope] = (unread[e.scope] || 0) + 1;
-        renderScopeSelect();
-        renderTasks();
+        renderTree();
+        setHtml($('#pane-tabs'), tabsHtml());
       }
       return;
     }
     const el = $('#chat');
     const stick = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     el.querySelector('.empty')?.remove();
-    const th = $('#thinking');
-    if (th) th.remove();
+    $('#thinking')?.remove();
     const node = chatNode(e);
     node.classList.add('enter');
     el.appendChild(node);
     updateThinking();
     if (stick) el.scrollTop = el.scrollHeight;
   }
-
-  let scopeSig = '';
-  function renderScopeSelect() {
-    const roots = S.tasks.filter((t) => !t.parentId).reverse();
-    const opts = [{ id: 'general', label: 'General overview' }, ...roots.map((t) => ({ id: t.id, label: `${t.id} · ${t.title.slice(0, 40)}` }))];
-    if (!opts.some((o) => o.id === scope)) scope = 'general';
-    const sig = JSON.stringify(opts.map((o) => [o.id, o.label, sup(o.id).status, unread[o.id] || 0])) + scope;
-    const st = sup(scope);
-    $('#scope-state').textContent = st.status === 'working' ? `working · ${ago(st.since)}${st.queued ? ` · ${st.queued} queued` : ''}` : 'idle';
-    $('#sup-stop').classList.toggle('hidden', st.status !== 'working');
-    if (sig === scopeSig) return;
-    scopeSig = sig;
-    const sel = $('#scope');
-    sel.innerHTML = opts.map((o) => `<option value="${o.id}">${esc((unread[o.id] ? '● ' : '') + (sup(o.id).status === 'working' ? '… ' : '') + o.label)}</option>`).join('');
-    sel.value = scope;
-    $('#msg').placeholder = scope === 'general' ? 'Ask for an overview…  (read-only; use a task chat to direct work)' : `Message the supervisor of ${scope}…  (@a1 or @name to point at an agent · Enter to send)`;
-  }
-  function selectScope(id) {
-    scope = id;
-    localStorage.setItem('scope', id);
-    unread[id] = 0;
-    scopeSig = '';
-    renderScopeSelect();
-    renderTasks();
-    renderChatAll();
-    $('#msg').focus();
+  function updateChatChrome() {
+    if (nav.view !== 'chat') return;
+    const st = sup(nav.scope);
+    const who = nav.scope === 'general' ? 'Assistant' : `Supervisor of ${nav.scope}`;
+    const stateEl = $('#scope-state');
+    if (stateEl) stateEl.textContent = `${who} · ${st.status === 'working' ? `working ${ago(st.since)}${st.queued ? ` · ${st.queued} queued` : ''}` : 'idle'}`;
+    $('#sup-stop')?.classList.toggle('hidden', st.status !== 'working');
+    const msg = $('#msg');
+    if (msg) msg.placeholder = nav.scope === 'general' ? 'Ask for an overview…  (read-only; open a task to direct work)' : `Message ${nav.scope}’s supervisor…  (@a1 or @name to point at an agent · Enter to send)`;
   }
   function updateThinking() {
     const el = $('#chat');
+    if (!el || nav.view !== 'chat') return;
     let th = $('#thinking');
-    const working = sup(scope).status === 'working';
+    const working = sup(nav.scope).status === 'working';
     if (working && !th) {
       th = document.createElement('div');
       th.id = 'thinking';
       th.className = 'thinking';
-      th.innerHTML = `${typing}<span>${scope === 'general' ? 'assistant' : `supervisor of ${scope}`} is working…</span>`;
+      th.innerHTML = `${typing}<span>${nav.scope === 'general' ? 'assistant' : `supervisor of ${nav.scope}`} is working…</span>`;
       el.appendChild(th);
       el.scrollTop = el.scrollHeight;
     } else if (!working && th) th.remove();
     else if (working && th && el.lastChild !== th) el.appendChild(th);
   }
 
-  // ---------- modal ----------
-  const modal = $('#modal');
-  const sheet = $('#sheet');
-  function openModal(view) {
-    openView = view;
-    sheet.dataset.sig = ''; // always rebuild on open
-    renderModal();
-    modal.classList.remove('hidden');
-  }
-  function closeModal() {
-    openView = null;
-    sheet.dataset.sig = '';
-    modal.classList.add('hidden');
-  }
-  function renderModal() {
-    if (!openView) return;
-    if (openView.type === 'new') return renderNewTask();
-    if (openView.type === 'task') return renderTaskDetail();
-    if (openView.type === 'agent') return renderAgentDetail();
-  }
-  const shell = ({ head, tabs = '', body, foot, tag = 'div', attrs = '' }) => `<${tag} class="shell" ${attrs}>
-    <div class="sheet-head">${head}<button type="button" class="x" data-close title="Close (Esc)">✕</button></div>
-    ${tabs}<div class="sheet-body" id="sheet-body">${body}</div>
-    <div class="sheet-foot">${foot}</div></${tag}>`;
-
-  // Rebuild the dialog only when its content signature changed; keep the body scroll position.
-  function paint(view, id, sig, html) {
-    const same = sheet.dataset.view === view && sheet.dataset.id === id;
-    if (same && sheet.dataset.sig === sig) return false;
-    const top = $('#sheet-body')?.scrollTop ?? 0;
-    sheet.dataset.view = view;
-    sheet.dataset.id = id;
-    sheet.dataset.sig = sig;
-    sheet.innerHTML = html;
-    if (same) $('#sheet-body').scrollTop = top;
-    return true;
+  // ----- overview view -----
+  function overviewHtml() {
+    const t = getTask(nav.scope);
+    if (!t) return '';
+    const plan = t.plan;
+    const kids = familyOf(t.id);
+    const agents = agentsIn(t.id);
+    return `<h4>Request</h4><div class="block">${esc(t.prompt)}</div>
+      <h4>Plan · ${plan ? (plan.approved ? 'approved' : '<span style="color:var(--warn)">waiting for your approval</span>') : 'none yet'}</h4>
+      ${plan ? `<div class="block">${esc(plan.text)}</div>${!plan.approved ? `<div class="inline-actions"><button class="primary" data-approve="${t.id}">Approve plan</button><button data-nav="${t.id}/chat">Ask for changes in chat</button></div>` : ''}
+        <h4>Open points · non-blocking</h4><div class="block">${esc(plan.openPoints || '(none)')}</div>` : '<div class="muted">The supervisor has not drafted a plan yet.</div>'}
+      ${kids.length ? `<h4>Subtasks <span class="count">${kids.length}</span></h4>${kids.map((k) => `<div class="subrow" data-nav="${t.id}/sub/${k.id}"><span class="id">${k.id}</span><span class="grow title">${esc(k.title)}</span>${S.agents.filter((a) => a.taskId === k.id).map((a) => `<span class="chip">${a.id}</span>`).join('')}${badge(k.status)}</div>`).join('')}` : ''}
+      ${agents.length ? `<h4>Agents <span class="count">${agents.length}</span></h4><div class="wrap">${agents.map((a) => `<span class="agentchip" data-nav="${t.id}/agent/${a.id}">${avatar(a, 'xs')}${esc(a.name)} ${badge(a.status)}</span>`).join('')}</div>` : ''}
+      ${t.notes.length ? `<h4>Notes</h4><div class="block">${t.notes.map((n) => `${ago(n.ts)} ago · ${esc(n.text)}`).join('\n')}</div>` : ''}`;
   }
 
-  function renderNewTask() {
-    if (sheet.dataset.view === 'new') return; // do not wipe the form on state refresh
-    sheet.dataset.view = 'new';
-    sheet.innerHTML = shell({
-      tag: 'form',
-      attrs: 'id="new-form"',
-      head: `<div class="avatar lg" style="--h:250">✦</div><div><h3>New task</h3><div class="sub">A supervisor takes it from here. Nothing starts without an approved plan.</div></div>`,
-      body: `<label>What should be done? *</label><textarea name="prompt" rows="5" required placeholder="Describe the task"></textarea>
-        <label>Existing plan (optional): leave empty and the supervisor will draft one for your approval</label><textarea name="plan" rows="5" placeholder="1. …&#10;2. …"></textarea>
-        <div class="two">
-          <div><label>Open points (optional, non-blocking, may change during the work)</label><textarea name="openPoints" rows="2"></textarea></div>
-          <div><label>Number of subagents (optional, empty = supervisor decides, up to ${S.config.maxAgentsPerTask || 5} at once)</label><input name="agents" type="number" min="1" max="${S.config.maxAgentsPerTask || 5}" placeholder="auto"></div>
-        </div>`,
-      foot: `<button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Start task</button>`,
-    });
-    $('#new-form textarea').focus();
+  // ----- subtask view -----
+  function subHtml() {
+    const k = getTask(nav.id);
+    if (!k) return '';
+    const agents = S.agents.filter((a) => a.taskId === k.id);
+    return `<div class="crumbs"><a data-nav="${nav.scope}/overview">${nav.scope} overview</a> › <span>${k.id}</span></div>
+      <div class="page-title"><h3>${esc(k.title)}</h3>${badge(k.status)}</div>
+      <h4>Description</h4><div class="block">${esc(k.prompt)}</div>
+      ${agents.length ? `<h4>Assigned agents</h4>${agents.map((a) => `<div class="rcard" style="margin-bottom:8px" data-nav="${nav.scope}/agent/${a.id}">${avatar(a)}<div class="grow"><div class="row"><span class="title grow">${esc(a.name)}</span><span class="id">${a.id}</span>${badge(a.status)}</div><div class="activity">${isLive(a) ? typing : ''}<span class="title">${esc(a.activity || '')}</span></div>${todoSummary(a)}</div></div>`).join('')}` : '<h4>Assigned agents</h4><div class="muted">No agent assigned (the supervisor may be doing this itself).</div>'}
+      ${k.notes.length ? `<h4>Notes</h4><div class="block">${k.notes.map((n) => `${ago(n.ts)} ago · ${esc(n.text)}`).join('\n')}</div>` : ''}`;
   }
 
-  function renderTaskDetail() {
-    const t = S.tasks.find((x) => x.id === openView.id);
-    if (!t) return closeModal();
-    const root = rootOf(t);
-    const plan = root.plan;
-    const agents = t.agentIds.map((id) => S.agents.find((a) => a.id === id)).filter(Boolean);
-    const kids = S.tasks.filter((x) => x.parentId === t.id);
-    const prog = taskProgress(t);
-    const sig = JSON.stringify([t, plan, kids.map((k) => [k.id, k.status, k.title]), agents.map((a) => [a.id, a.status])]);
-    const planState = plan ? (plan.approved ? 'approved' : '<span style="color:var(--warn)">waiting for your approval</span>') : 'none yet';
-    paint(
-      'task',
-      t.id,
-      sig,
-      shell({
-        head: `<div class="avatar lg" style="--h:${hue(t.id)};font-size:19px">${esc(t.id)}</div>
-          <div class="grow" style="padding-right:28px"><h3>${esc(t.title)}</h3>
-          <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓' : '…') : '—'}</span>${agents.length ? `<span class="chip">${agents.length} agent${agents.length > 1 ? 's' : ''}</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}<span>created ${ago(t.createdAt)} ago</span></div></div>`,
-        body: `<h4>Request</h4><div class="block">${esc(t.prompt)}</div>
-          <h4>Plan · ${planState}${t.parentId ? ` (from ${root.id})` : ''}</h4>
-          ${plan ? `<div class="block">${esc(plan.text)}</div><h4>Open points · non-blocking</h4><div class="block">${esc(plan.openPoints || '(none)')}</div>` : '<div class="muted">The supervisor has not drafted a plan yet.</div>'}
-          ${agents.length ? `<h4>Agents</h4><div class="wrap">${agents.map((a) => `<span class="agentchip" data-agent="${a.id}">${avatar(a, 'xs')}${esc(a.name)} ${badge(a.status)}</span>`).join('')}</div>` : ''}
-          ${kids.length ? `<h4>Subtasks</h4>${kids.map((k) => `<div class="subrow"><span class="id">${k.id}</span><span class="grow title">${esc(k.title)}</span>${badge(k.status)}</div>`).join('')}` : ''}
-          ${t.notes.length ? `<h4>Notes</h4><div class="block">${t.notes.map((n) => `${ago(n.ts)} ago · ${esc(n.text)}`).join('\n')}</div>` : ''}`,
-        foot: `${!t.parentId && !['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}
-          <span class="spacer"></span>
-          <button data-chat="${root.id}">Open ${root.id} chat</button>
-          ${!t.parentId && plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}
-          <button class="ghost" data-close>Close</button>`,
-      })
-    );
-  }
-
-  let agentTab = 'overview';
+  // ----- agent view -----
   const tlHtml = (e) => `<div class="tl ${e.kind}"><span class="t">${esc(e.kind === 'input' ? 'Briefing · ' + e.text.slice(0, 400) : e.text)}</span><time>${clock(e.ts)}</time></div>`;
   const liveMarker = '<div class="tl running" id="tl-live"><span class="t muted">working…</span></div>';
-
-  function renderAgentDetail() {
-    const a = S.agents.find((x) => x.id === openView.id);
-    if (!a) return closeModal();
-    const task = S.tasks.find((t) => t.id === a.taskId);
+  function fillTimeline() {
+    const l = $('#agent-log');
+    const a = S.agents.find((x) => x.id === nav.id);
+    if (!l || !a) return;
+    l.innerHTML = agentLog.map(tlHtml).join('') + (isLive(a) ? liveMarker : '');
+    const b = body();
+    b.scrollTop = b.scrollHeight;
+  }
+  async function loadAgentLog(id) {
+    try {
+      const { log } = await api('GET', `/agents/${id}/log`);
+      if (nav.view === 'agent' && nav.id === id) {
+        agentLog = log;
+        const c = $('#act-count');
+        if (c) c.textContent = agentLog.length;
+        if (agentTab === 'activity') fillTimeline();
+      }
+    } catch {}
+  }
+  function renderAgentView() {
+    const a = S.agents.find((x) => x.id === nav.id);
+    if (!a) return go(`${nav.scope}/chat`);
+    const task = getTask(a.taskId);
     const live = isLive(a);
     const done = a.todos.filter((t) => t.status === 'done').length;
     const pct = a.todos.length ? Math.round((done / a.todos.length) * 100) : 0;
-    const sig = JSON.stringify([a.status, a.todos, a.report, a.endedAt, a.owns, a.objective, agentTab, task?.title]);
-    const activityLine = `${live ? typing : ''}<span class="title">${esc(a.activity || '')}</span>`;
-
     const overview = `<div class="grid2">
         <div>
           <h4>Objective</h4><div class="block">${esc(a.objective)}</div>
@@ -329,93 +422,93 @@
         </div>
       </div>
       ${a.report ? `<h4>${a.status === 'done' ? 'Final report' : 'Last message'}</h4><div class="block report ${a.status === 'done' ? '' : 'bad'}">${esc(a.report)}</div>` : ''}`;
-    const activity = `<div class="timeline" id="agent-log">${agentLog.map(tlHtml).join('')}${live ? liveMarker : ''}</div>`;
-
-    const rebuilt = paint(
-      'agent',
-      a.id,
-      sig,
-      shell({
-        head: `${avatar(a, 'lg')}
-          <div class="grow" style="padding-right:28px">
-            <div class="row" style="gap:10px"><h3>${esc(a.name)}</h3><span class="id">${a.id}</span>${badge(a.status)}</div>
-            <div class="sub"><span class="chip" data-task="${a.taskId}" style="cursor:pointer">${esc(a.taskId)}${task ? ' · ' + esc(task.title.slice(0, 40)) : ''}</span><span>started ${ago(a.startedAt)} ago</span><span class="chip" id="agent-dur">${dur(a)}</span></div>
-            <div class="activity" id="agent-activity">${activityLine}</div>
-          </div>`,
-        tabs: `<div class="sheet-tabs">
-          <button class="tab ${agentTab === 'overview' ? 'on' : ''}" data-tab="overview">Overview</button>
-          <button class="tab ${agentTab === 'activity' ? 'on' : ''}" data-tab="activity">Activity<span class="count" id="act-count">${agentLog.length}</span></button></div>`,
-        body: agentTab === 'overview' ? overview : activity,
-        foot: `${live ? `<button class="danger" data-stop="${a.id}">Stop agent</button>` : ''}<span class="spacer"></span><button class="ghost" data-close>Close</button>`,
-      })
-    );
-    if (rebuilt && agentTab === 'activity') {
-      const b = $('#sheet-body');
-      b.scrollTop = b.scrollHeight;
-    }
-    if (!rebuilt) {
-      // cheap in-place refresh of the live bits
-      const act = $('#agent-activity');
-      if (act) setHtml(act, activityLine);
-      const d = $('#agent-dur');
-      if (d) d.textContent = dur(a);
-    }
+    const html = `<div class="ahero">${avatar(a, 'lg')}
+        <div class="grow">
+          <div class="row" style="gap:10px"><h3>${esc(a.name)}</h3><span class="id">${a.id}</span>${badge(a.status)}</div>
+          <div class="sub"><span class="chip" data-nav="${nav.scope}/${a.taskId === nav.scope ? 'overview' : 'sub/' + a.taskId}">${esc(a.taskId)}${task ? ' · ' + esc(task.title.slice(0, 40)) : ''}</span><span>started ${ago(a.startedAt)} ago</span><span class="chip" id="agent-dur"></span></div>
+          <div class="activity" id="agent-activity"></div>
+        </div>${live ? `<button class="danger" data-stop="${a.id}">Stop agent</button>` : ''}</div>
+      <div class="seg"><button class="${agentTab === 'overview' ? 'on' : ''}" data-tab="overview">Overview</button><button class="${agentTab === 'activity' ? 'on' : ''}" data-tab="activity">Activity <span class="count" id="act-count"></span></button></div>
+      ${agentTab === 'overview' ? overview : '<div class="timeline" id="agent-log"></div>'}`;
+    const rebuilt = setBody(html);
+    if (rebuilt && agentTab === 'activity') fillTimeline();
+    // live bits are filled in place so the page itself is not rebuilt on every tick
+    setHtml($('#agent-activity'), `${live ? typing : ''}<span class="title">${esc(a.activity || '')}</span>`);
+    const d = $('#agent-dur');
+    if (d) d.textContent = dur(a);
+    const c = $('#act-count');
+    if (c) c.textContent = agentLog.length;
   }
 
-  async function openAgent(id) {
-    agentLog = [];
-    agentTab = 'overview';
-    openModal({ type: 'agent', id });
-    try {
-      const { log } = await api('GET', `/agents/${id}/log`);
-      if (openView?.type === 'agent' && openView.id === id) {
-        agentLog = log;
-        sheet.dataset.sig = '';
-        renderAgentDetail();
-      }
-    } catch {}
+  // ---------- new-task modal ----------
+  const modal = $('#modal');
+  const sheet = $('#sheet');
+  const closeModal = () => modal.classList.add('hidden');
+  function openNewTask() {
+    sheet.innerHTML = `<form class="shell" id="new-form">
+      <div class="sheet-head"><div class="avatar lg" style="--h:250">✦</div><div><h3>New task</h3><div class="sub">A supervisor takes it from here. Nothing starts without an approved plan.</div></div><button type="button" class="x" data-close title="Close (Esc)">✕</button></div>
+      <div class="sheet-body">
+        <label>What should be done? *</label><textarea name="prompt" rows="5" required placeholder="Describe the task"></textarea>
+        <label>Existing plan (optional): leave empty and the supervisor will draft one for your approval</label><textarea name="plan" rows="5" placeholder="1. …&#10;2. …"></textarea>
+        <div class="two">
+          <div><label>Open points (optional, non-blocking, may change during the work)</label><textarea name="openPoints" rows="2"></textarea></div>
+          <div><label>Number of subagents (optional, empty = supervisor decides, up to ${S.config.maxAgentsPerTask || 5} at once)</label><input name="agents" type="number" min="1" max="${S.config.maxAgentsPerTask || 5}" placeholder="auto"></div>
+        </div>
+      </div>
+      <div class="sheet-foot"><button type="button" class="ghost" data-close>Cancel</button><button class="primary" type="submit">Start task</button></div></form>`;
+    modal.classList.remove('hidden');
+    sheet.querySelector('textarea').focus();
   }
 
   // ---------- events ----------
   document.addEventListener('click', async (ev) => {
     const t = ev.target;
     if (t.closest('[data-close]') || t === modal) return closeModal();
+    const tg = t.closest('[data-toggle]');
+    if (tg) {
+      ev.stopPropagation();
+      const id = tg.dataset.toggle;
+      expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+      saveExpanded();
+      return renderTree();
+    }
     const tab = t.closest('[data-tab]');
     if (tab) {
       agentTab = tab.dataset.tab;
-      sheet.dataset.sig = '';
-      return renderAgentDetail();
-    }
-    const ch = t.closest('[data-chat]');
-    if (ch) {
-      closeModal();
-      return selectScope(ch.dataset.chat);
+      body()._html = null;
+      return renderAgentView();
     }
     const ap = t.closest('[data-approve]');
-    if (ap) {
-      ev.stopPropagation();
-      await api('POST', `/tasks/${ap.dataset.approve}/approve`).catch(() => {});
-      return;
-    }
+    if (ap) return void (await api('POST', `/tasks/${ap.dataset.approve}/approve`).catch(() => {}));
     const cn = t.closest('[data-cancel]');
     if (cn) {
       if (confirm(`Cancel ${cn.dataset.cancel} and stop its agents?`)) await api('POST', `/tasks/${cn.dataset.cancel}/cancel`).catch(() => {});
       return;
     }
     const st = t.closest('[data-stop]');
-    if (st) return void api('POST', `/agents/${st.dataset.stop}/stop`).catch(() => {});
-    const ag = t.closest('[data-agent]');
-    if (ag) return openAgent(ag.dataset.agent);
-    const tk = t.closest('[data-task]');
-    if (tk) return openModal({ type: 'task', id: tk.dataset.task });
+    if (st) return void (await api('POST', `/agents/${st.dataset.stop}/stop`).catch(() => {}));
+    if (t.closest('#sup-stop')) return void (await api('POST', `/supervisors/${nav.scope}/stop`).catch(() => {}));
+    const nv = t.closest('[data-nav]');
+    if (nv) return go(nv.dataset.nav);
   });
-  $('#new-task').onclick = () => {
-    sheet.dataset.view = '';
-    openModal({ type: 'new' });
+  $('#new-task').onclick = openNewTask;
+  $('#collapse-all').onclick = () => {
+    expanded.clear();
+    saveExpanded();
+    renderTree();
   };
-  $('#sup-stop').onclick = () => api('POST', `/supervisors/${scope}/stop`).catch(() => {});
-  $('#scope').onchange = (e) => selectScope(e.target.value);
-  document.addEventListener('keydown', (e) => e.key === 'Escape' && closeModal());
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeModal();
+    if (e.target.id === 'msg' && e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      $('#composer').requestSubmit();
+    }
+  });
+  document.addEventListener('input', (e) => {
+    if (e.target.id !== 'msg') return;
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
+  });
   document.addEventListener('submit', async (e) => {
     if (e.target.id === 'new-form') {
       e.preventDefault();
@@ -423,7 +516,8 @@
       await api('POST', '/tasks', f)
         .then((task) => {
           closeModal();
-          selectScope(task.id); // jump to the new task's own supervisor chat
+          if (!getTask(task.id)) S.tasks.push(task); // the live update will confirm it in a moment
+          go(`${task.id}/chat`); // jump into the new task's supervisor
         })
         .catch(() => {});
     } else if (e.target.id === 'composer') {
@@ -433,37 +527,41 @@
       if (!text) return;
       box.value = '';
       box.style.height = 'auto';
-      await api('POST', '/chat', { scope, text }).catch(() => (box.value = text));
-    }
-  });
-  $('#msg').addEventListener('input', (e) => {
-    e.target.style.height = 'auto';
-    e.target.style.height = Math.min(e.target.scrollHeight, 140) + 'px';
-  });
-  $('#msg').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      $('#composer').requestSubmit();
+      await api('POST', '/chat', { scope: nav.scope, text }).catch(() => (box.value = text));
     }
   });
 
   function renderAll() {
+    // The URL is the source of truth: if it points at something that only just appeared
+    // (e.g. a task created a moment ago), follow it now.
+    const target = parseHash();
+    if (target && pathOf(target) !== navKey) return route();
     renderHeader();
-    renderTasks();
-    renderAgents();
-    renderScopeSelect();
-    updateThinking();
-    if (openView && openView.type !== 'new') renderModal();
+    renderTree();
+    updateView();
   }
 
-  async function init() {
+  // Full reload of server state (first load, and after the live connection was lost and came back).
+  async function loadState() {
     const s = await api('GET', '/state');
     S = s;
     chat.length = 0;
     chat.push(...s.chat);
-    renderAll();
-    renderChatAll();
+    renderHeader();
+    navKey = ''; // force the current view to be rebuilt from the fresh data
+    route();
+    renderTree();
+  }
+
+  async function init() {
+    if (!location.hash) history.replaceState(null, '', '#/' + (localStorage.getItem('nav') || 'general'));
+    await loadState();
     const es = new EventSource('/api/events');
+    let wasDown = false;
+    es.onopen = () => {
+      if (wasDown) loadState().catch(() => {});
+      wasDown = false;
+    };
     es.addEventListener('state', (e) => {
       S = { ...S, ...JSON.parse(e.data) };
       renderAll();
@@ -472,25 +570,28 @@
     es.addEventListener('notice', (e) => toast(JSON.parse(e.data).text, 'info', 8000));
     es.addEventListener('log', (e) => {
       const { agentId, entry } = JSON.parse(e.data);
-      if (openView?.type === 'agent' && openView.id === agentId) {
-        agentLog.push(entry);
-        const cnt = $('#act-count');
-        if (cnt) cnt.textContent = agentLog.length;
-        const l = $('#agent-log');
-        if (l) {
-          const body = $('#sheet-body');
-          const stick = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
-          const marker = $('#tl-live');
-          if (marker) marker.insertAdjacentHTML('beforebegin', tlHtml(entry));
-          else l.insertAdjacentHTML('beforeend', tlHtml(entry));
-          if (stick) body.scrollTop = body.scrollHeight;
-        }
-      }
+      if (nav.view !== 'agent' || nav.id !== agentId) return;
+      agentLog.push(entry);
+      const c = $('#act-count');
+      if (c) c.textContent = agentLog.length;
+      const l = $('#agent-log');
+      if (!l) return;
+      const b = body();
+      const stick = b.scrollHeight - b.scrollTop - b.clientHeight < 60;
+      const marker = $('#tl-live');
+      if (marker) marker.insertAdjacentHTML('beforebegin', tlHtml(entry));
+      else l.insertAdjacentHTML('beforeend', tlHtml(entry));
+      if (stick) b.scrollTop = b.scrollHeight;
     });
-    es.onerror = () => {}; // EventSource reconnects by itself
+    es.onerror = () => {
+      wasDown = true; // EventSource reconnects by itself; onopen then re-syncs
+    };
     setInterval(() => {
       renderHeader();
-      renderScopeSelect();
+      updateChatChrome();
+      const d = $('#agent-dur');
+      const a = nav.view === 'agent' && S.agents.find((x) => x.id === nav.id);
+      if (d && a) d.textContent = dur(a);
     }, 5000);
   }
   init();
