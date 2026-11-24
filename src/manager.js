@@ -29,7 +29,13 @@ if (process.env.AGENT_MANAGER_WORKSPACE) config.workspace = process.env.AGENT_MA
 const MODELS = ['haiku', 'sonnet', 'opus'];
 const WEB_TOOLS = ['WebFetch', 'WebSearch'];
 const GENERAL_TOOLS = ['Read', 'Glob', 'Grep'];
-const WORKSPACE = path.resolve(ROOT, config.workspace);
+// Resolve to the real, long-form path. On Windows a path with an 8.3 short name (USER~1) makes
+// Claude Code refuse writes as a "suspicious path", so agents would be blocked.
+const WORKSPACE = (() => {
+  const p = path.resolve(ROOT, config.workspace);
+  fs.mkdirSync(p, { recursive: true });
+  return fs.realpathSync.native(p);
+})();
 const DATA = process.env.AGENT_MANAGER_DATA || path.join(ROOT, 'data');
 const GENERAL = 'general';
 
@@ -391,6 +397,8 @@ function cancelTask(taskId) {
       } catch {
         /* already finished */
       }
+      const ag = getAgent(aid);
+      if (ag?.status === 'waiting') Object.assign(ag, { status: 'stopped', question: null, activity: 'stopped' }); // no process to kill
     }
     if (!['done', 'failed'].includes(t.status)) t.status = 'cancelled';
     t.updatedAt = now();
@@ -418,6 +426,8 @@ function pushLog(agent, entry) {
 
 const isLive = (a) => a.status === 'running' || a.status === 'starting';
 const running = () => state.agents.filter(isLive);
+// A waiting agent has no process, but it still owns its write paths until it is resumed or stopped.
+const holding = () => state.agents.filter((a) => isLive(a) || a.status === 'waiting');
 const runningFor = (scope) => running().filter((a) => scopeOfAgent(a) === scope);
 
 // A single heads-up for a burst of spawns, with the totals across all tasks (there is no global cap).
@@ -450,7 +460,7 @@ function normalizeOwns(owns) {
 }
 const pathsOverlap = (a, b) => a === '' || b === '' || a === b || a.startsWith(b + '/') || b.startsWith(a + '/');
 function checkClaims(owns, exceptAgentId) {
-  for (const other of running()) {
+  for (const other of holding()) {
     if (other.id === exceptAgentId) continue;
     for (const mine of owns) {
       for (const theirs of other.owns || []) {
@@ -516,6 +526,8 @@ function startAgentRun(agent, prompt) {
   agent.status = 'running';
   agent.stopRequested = false;
   agent.endedAt = null;
+  agent.pendingAsk = null; // set by the agent's `ask` tool during this run
+  agent.question = null;
   let finalResult = null;
   let isError = false;
   pushLog(agent, { kind: 'input', text: prompt.slice(0, 1500) });
@@ -548,8 +560,26 @@ function startAgentRun(agent, prompt) {
       children.delete(agent.id);
       agent.endedAt = now();
       const ok = code === 0 && !isError;
-      agent.status = agent.stopRequested ? 'stopped' : ok ? 'done' : 'failed';
+      const asked = agent.pendingAsk && !agent.stopRequested;
+      agent.status = agent.stopRequested ? 'stopped' : asked ? 'waiting' : ok ? 'done' : 'failed';
       agent.report = finalResult || (stderr.trim() ? `(no report) ${stderr.trim().slice(-600)}` : '(no report)');
+      if (asked) {
+        // The agent asked a question and ended its run. It stays resumable (own session) and keeps
+        // its write claims. The supervisor gets a SHORT notice; the user can answer on the agent page.
+        const q = agent.pendingAsk;
+        agent.question = q;
+        agent.pendingAsk = null;
+        agent.activity = 'waiting for an answer';
+        pushLog(agent, { kind: 'question', text: q.text + (q.options.length ? `\nOptions: ${q.options.join(' | ')}` : '') });
+        addChat(scope, 'event', `${agent.id} “${agent.name}” is waiting for an answer: ${q.text.slice(0, 140)}`);
+        bus.emit('notice', { text: `${agent.id} “${agent.name}” (${agent.taskId}) asks: ${q.text.slice(0, 160)}` });
+        changed();
+        wakeSupervisor(
+          scope,
+          `AGENT QUESTION from ${agent.id} "${agent.name}" on ${agent.taskId}: ${q.text}${q.options.length ? `\nOptions: ${q.options.join(' | ')}` : ''}\n(The user can also answer it directly on the agent's page.) If this is routine and the plan or your context lets you decide, answer it with answer_agent. If you really do not know, ask the user with ask_user, then relay their answer with answer_agent.`
+        );
+        return;
+      }
       agent.activity = agent.status === 'done' ? 'finished' : agent.status;
       pushLog(agent, { kind: ok ? 'result' : 'error', text: agent.report.slice(0, 4000) });
       changed();
@@ -561,16 +591,81 @@ function startAgentRun(agent, prompt) {
   children.set(agent.id, child);
 }
 
-function sendToAgent(ref, message, scope = GENERAL) {
-  const agent = agentInScope(scope, ref);
+// Resume a non-running agent's own session with a new message (follow-up, or the answer to its question).
+function resumeAgent(agent, text) {
   const own = scopeOfAgent(agent);
-  if (isLive(agent)) fail(`${agent.id} is still running; you can only message it after it finishes (or stop it first).`);
+  if (isLive(agent)) fail(`${agent.id} is running right now; you can message it once it pauses or finishes (or stop it first).`);
   if (!agent.sessionId) fail(`${agent.id} has no session to resume.`);
   if (runningFor(own).length >= config.maxAgentsPerTask) fail(`Agent limit for ${own} reached.`);
   checkClaims(agent.owns || [], agent.id);
-  startAgentRun(agent, `Follow-up from the supervisor:\n${message}`);
+  startAgentRun(agent, text);
   noticeSpawn(own);
   return agent;
+}
+
+function sendToAgent(ref, message, scope = GENERAL) {
+  return resumeAgent(agentInScope(scope, ref), `Follow-up from the supervisor:\n${message}`);
+}
+
+// ---------- questions ----------
+// Agent -> (supervisor or user): the `ask` tool. The agent is told to end its turn right after; the run
+// then finishes as `waiting` (see startAgentRun).
+function agentAsk(agentId, question, options = []) {
+  const agent = getAgent(agentId) || fail('unknown agent');
+  if (!question?.trim()) fail('question is empty');
+  if (agent.pendingAsk) fail('You already asked a question in this run. Stop now and wait for the answer.');
+  agent.pendingAsk = { text: question.trim().slice(0, 1200), options: (options || []).map((o) => String(o).slice(0, 120)).slice(0, 6), askedAt: now() };
+  return 'Question recorded. STOP NOW: end your turn immediately without doing more work. You will be resumed with the answer.';
+}
+
+// Supervisor answers a waiting agent (routine question), or relays what the user said.
+function answerAgent(ref, answer, scope = GENERAL) {
+  const agent = agentInScope(scope, ref);
+  if (agent.status !== 'waiting' || !agent.question) fail(`${agent.id} is not waiting for an answer (status: ${agent.status}). Someone may have answered already.`);
+  const q = agent.question.text;
+  addChat(scopeOfAgent(agent), 'event', `Supervisor answered ${agent.id}`);
+  return resumeAgent(agent, `Answer from the supervisor to your question "${q}":\n${answer}`);
+}
+
+// User -> agent, directly (no supervisor tokens spent). Works for waiting agents (it is the answer)
+// and for finished/failed/stopped ones (it is a follow-up). The result still reaches the supervisor
+// when the agent finishes.
+function userMessageAgent(ref, text) {
+  const agent = findAgent(ref) || fail(`No such agent: ${ref}`);
+  if (!text?.trim()) fail('empty message');
+  const waiting = agent.status === 'waiting' && agent.question;
+  const body = waiting ? `Answer from the user to your question "${agent.question.text}":\n${text.trim()}` : `Message from the user:\n${text.trim()}`;
+  addChat(scopeOfAgent(agent), 'event', `You ${waiting ? 'answered' : 'messaged'} ${agent.id} directly`);
+  return resumeAgent(agent, body);
+}
+
+const pendingQuestions = (scope) => state.chat.filter((e) => e.scope === scope && e.role === 'question' && !e.answered);
+const waitingAgents = (scope) => state.agents.filter((a) => a.status === 'waiting' && scopeOfAgent(a) === scope);
+
+// Supervisor -> user: a question card in its chat. The supervisor ends its turn; the answer arrives as the next message.
+function askUser(scope, question, options = []) {
+  validScope(scope);
+  if (!question?.trim()) fail('question is empty');
+  addChat(scope, 'question', question.trim(), { options: (options || []).map((o) => String(o).slice(0, 120)).slice(0, 6), answered: false });
+  bus.emit('notice', { text: `${scope} needs your answer: ${question.trim().slice(0, 140)}` });
+  return 'Question posted to the user. END YOUR TURN NOW; their answer will arrive as your next message.';
+}
+function markQuestionsAnswered(scope, answer) {
+  for (const e of pendingQuestions(scope)) {
+    e.answered = true;
+    e.answer = answer;
+    bus.emit('chatUpdate', { id: e.id, patch: { answered: true, answer } });
+  }
+}
+function answerQuestion(chatId, text) {
+  const e = state.chat.find((x) => x.id === chatId && x.role === 'question');
+  if (!e) fail('No such question.');
+  if (e.answered) fail('Already answered.');
+  if (!text?.trim()) fail('empty answer');
+  const scope = e.scope;
+  markQuestionsAnswered(scope, text.trim());
+  addChat(scope, 'user', text.trim());
+  enqueueSupervisor(scope, `The user answered your question "${e.text}":\n${text.trim()}`);
 }
 
 function stopAgent(ref, { quiet = false, scope = GENERAL } = {}) {
@@ -612,6 +707,7 @@ function mentionContext(text, scope) {
 function sendUserMessage(scope, text) {
   validScope(scope);
   if (!text?.trim()) fail('empty message');
+  markQuestionsAnswered(scope, '(answered in chat)'); // typing a reply counts as answering any open question card
   addChat(scope, 'user', text.trim());
   enqueueSupervisor(scope, text.trim() + mentionContext(text, scope));
 }
@@ -621,7 +717,14 @@ function snapshot({ withChat = false } = {}) {
   const supervisors = {};
   for (const scope of [GENERAL, ...state.tasks.filter((t) => !t.parentId).map((t) => t.id)]) {
     const s = supState(scope);
-    supervisors[scope] = { status: s.status, since: s.since, queued: rt(scope).queue.length, usage: s.usage || null };
+    supervisors[scope] = {
+      status: s.status,
+      since: s.since,
+      queued: rt(scope).queue.length,
+      usage: s.usage || null,
+      // things only the user can unblock: open question cards, and agents waiting for an answer
+      needs: { questions: pendingQuestions(scope).length, agents: waitingAgents(scope).map((a) => a.id) },
+    };
   }
   const s = {
     tasks: state.tasks,
@@ -659,6 +762,6 @@ module.exports = {
   getTask, getAgent, findAgent, rootOf, planApproved, taskInScope, agentInScope, family, agentsOf, scopeOfAgent,
   addChat, sendUserMessage, stopSupervisor, validScope,
   submitUserTask, createTask, setPlan, updateOpenPoints, approveTask, updateTask, cancelTask, taskSummary,
-  spawnAgent, sendToAgent, stopAgent, setAgentTodos,
+  spawnAgent, sendToAgent, stopAgent, setAgentTodos, agentAsk, answerAgent, userMessageAgent, askUser, answerQuestion,
   snapshot, recover, usageReport,
 };

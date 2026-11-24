@@ -24,6 +24,8 @@ Needs Node 20+ and the `claude` CLI on PATH, already logged in.
 - **No global agent cap, but you are told.** Each spawn burst raises a notice ("T2 is starting 2 subagents. 4 agents running now across 2 tasks.") and the header always shows the live total. Every agent is a full Claude Code process using your usage budget.
 - **Only supervisors set task statuses.** Agents only keep their own checklist (shown on their card) and send a final report; the owning supervisor is woken when they finish.
 - **Open points** from the plan are passed to every agent as "non-blocking, keep it flexible".
+- **Questions.** Headless Claude Code cannot pop up prompts, so the app provides its own. An agent that is truly blocked calls `ask`, ends its run and shows as **waiting** (it keeps its session and write claims). The supervisor gets a short notice and answers routine questions itself (`answer_agent`); if it does not know, it asks you with `ask_user`, which appears as a **question card** in that task's chat (tap an option or type), and relays your answer. You can also answer an agent directly on its page, or message any finished agent there (no supervisor tokens spent; its result still reaches the supervisor). Anything waiting for you is flagged in the explorer and the header.
+- **Usage tab.** The gauge in the top-right header (your 5-hour plan window) opens a Usage page: plan limits with reset times (from Claude Code's own `rate_limit_event`), plus this app's token spend per day, model, task and agent.
 - Agent panels are read-only (live activity log, checklist, report). The only control is *Stop*.
 
 ## Config (`config.json`)

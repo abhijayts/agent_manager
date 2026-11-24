@@ -152,8 +152,9 @@
     const live = S.agents.filter(isLive);
     const liveTasks = new Set(live.map(scopeOfAgent)).size;
     const open = S.tasks.filter((t) => !t.parentId && !['done', 'failed', 'cancelled'].includes(t.status)).length;
+    const waiting = Object.keys(S.supervisors || {}).reduce((n, k) => n + needsCount(k), 0);
     const all = usageTotal(...Object.values(S.supervisors || {}).map((s) => s.usage), ...S.agents.map((a) => a.usage));
-    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}${all.in ? ` · ${tok(all.in + all.out)} tokens` : ''}`;
+    $('#stats').textContent = `${live.length} agent${live.length === 1 ? '' : 's'} running${live.length ? ` across ${liveTasks} task${liveTasks > 1 ? 's' : ''}` : ''} · ${open} open task${open === 1 ? '' : 's'}${waiting ? ` · ${waiting} waiting for you` : ''}${all.in ? ` · ${tok(all.in + all.out)} tokens` : ''}`;
     // plan-usage gauge next to the New task button (5-hour window, from Claude Code's own report)
     const fh = S.rateLimits?.fiveHour;
     const sd = S.rateLimits?.sevenDay;
@@ -172,6 +173,9 @@
     $('#stats').title = all.in ? `All supervisors and agents so far: ${all.in.toLocaleString()} input + ${all.out.toLocaleString()} output tokens (≈$${all.cost.toFixed(2)} at API prices; informational on a subscription)` : '';
   }
 
+  // things only you can unblock for a task: open question cards + agents waiting for an answer
+  const needsCount = (scope) => (sup(scope).needs?.questions || 0) + (sup(scope).needs?.agents?.length || 0);
+
   // ---------- explorer (navigates across ALL tasks) ----------
   function row({ depth = 0, to, cls = '', toggle = null, open = false, icon = '', label, trail = '', sel = false, title = '' }) {
     const chev = toggle ? `<span class="chev ${open ? 'open' : ''}" data-toggle="${toggle}">${ic.chev}</span>` : '<span class="chev none"></span>';
@@ -189,6 +193,7 @@
       const trail = [
         sup(t.id).status === 'working' ? '<span class="work-dot" title="supervisor working"></span>' : '',
         t.status === 'awaiting_approval' ? '<span class="chip warn tiny">approve</span>' : '',
+        needsCount(t.id) ? `<span class="chip warn tiny" title="a question is waiting for you">${needsCount(t.id)} need${needsCount(t.id) > 1 ? '' : 's'} you</span>` : '',
         unread[t.id] ? '<span class="unread" title="new message"></span>' : '',
         sdot(t.status),
       ].join('');
@@ -196,7 +201,7 @@
       if (!open) continue;
       out.push(row({ depth: 1, to: `${t.id}/chat`, icon: ic.chat, label: 'Supervisor', trail: unread[t.id] ? '<span class="unread"></span>' : sup(t.id).status === 'working' ? '<span class="work-dot"></span>' : '', sel: here && nav.view === 'chat' }));
       out.push(row({ depth: 1, to: `${t.id}/overview`, icon: ic.doc, label: 'Overview · plan', sel: here && nav.view === 'overview' }));
-      const agentRow = (a, depth) => row({ depth, to: `${t.id}/agent/${a.id}`, icon: avatar(a, 'xs'), label: esc(a.name), trail: `${isLive(a) ? typing : ''}${sdot(a.status)}`, sel: here && nav.view === 'agent' && nav.id === a.id, title: `${a.id} · ${a.status}` });
+      const agentRow = (a, depth) => row({ depth, to: `${t.id}/agent/${a.id}`, icon: avatar(a, 'xs'), label: esc(a.name), trail: `${isLive(a) ? typing : ''}${a.status === 'waiting' ? '<span class="chip warn tiny">?</span>' : ''}${sdot(a.status)}`, sel: here && nav.view === 'agent' && nav.id === a.id, title: `${a.id} · ${a.status}` });
       for (const k of familyOf(t.id)) {
         out.push(row({ depth: 1, to: `${t.id}/sub/${k.id}`, cls: `s-${k.status}`, icon: ic.task, label: `<span class="id">${k.id}</span>${esc(k.title)}`, trail: sdot(k.status), sel: here && nav.view === 'sub' && nav.id === k.id, title: k.title }));
         for (const a of S.agents.filter((x) => x.taskId === k.id)) out.push(agentRow(a, 2));
@@ -227,7 +232,7 @@
     const plan = t.plan;
     return `<div class="phead"><div class="avatar" style="--h:${hue(t.id)}">${esc(t.id)}</div>
       <div class="grow"><h3>${esc(t.title)}</h3>
-        <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓ approved' : '… needs approval') : '— none'}</span>${agents.length ? `<span class="chip">${agents.filter(isLive).length}/${agents.length} agents running</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}${usageChip(usageTotal(sup(t.id).usage, ...agents.map((a) => a.usage)), ` · supervisor ${tok(usageTotal(sup(t.id).usage).in + usageTotal(sup(t.id).usage).out)}, agents ${tok(usageTotal(...agents.map((a) => a.usage)).in + usageTotal(...agents.map((a) => a.usage)).out)}`)}<span>created ${ago(t.createdAt)} ago</span></div></div>
+        <div class="sub">${badge(t.status)}<span class="chip">plan ${plan ? (plan.approved ? '✓ approved' : '… needs approval') : '— none'}</span>${agents.length ? `<span class="chip">${agents.filter(isLive).length}/${agents.length} agents running</span>` : ''}${needsCount(t.id) ? `<span class="chip warn">${needsCount(t.id)} waiting for you</span>` : ''}${prog ? `<span class="chip">${prog.done}/${prog.total} subtasks</span>` : ''}${usageChip(usageTotal(sup(t.id).usage, ...agents.map((a) => a.usage)), ` · supervisor ${tok(usageTotal(sup(t.id).usage).in + usageTotal(sup(t.id).usage).out)}, agents ${tok(usageTotal(...agents.map((a) => a.usage)).in + usageTotal(...agents.map((a) => a.usage)).out)}`)}<span>created ${ago(t.createdAt)} ago</span></div></div>
       <div class="actions">${plan && !plan.approved ? `<button class="primary" data-approve="${t.id}">Approve plan</button>` : ''}${!['done', 'failed', 'cancelled'].includes(t.status) ? `<button class="danger" data-cancel="${t.id}">Cancel task</button>` : ''}</div></div>`;
   }
   function tabsHtml() {
@@ -298,7 +303,7 @@
   function railHtml() {
     const general = nav.scope === 'general';
     const list = general ? S.agents.filter(isLive) : agentsIn(nav.scope);
-    const order = { running: 0, starting: 0, failed: 1, stopped: 2, done: 3 };
+    const order = { waiting: 0, running: 1, starting: 1, failed: 2, stopped: 3, done: 4 };
     list.sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9) || b.id.localeCompare(a.id, undefined, { numeric: true }));
     const head = `<h5>${general ? 'Running now' : 'Subagents'} <span class="count">${list.length}</span></h5>`;
     if (!list.length) return head + `<div class="muted">${general ? 'No agents are running.' : 'No subagents. Easy tasks are done by the supervisor itself.'}</div>`;
@@ -315,12 +320,23 @@
         .join('')
     );
   }
+  // A question card: the supervisor (ask_user) or an agent (ask) needs a decision from you.
+  // `target` = { kind: 'chat', id } answers via the supervisor; { kind: 'agent', id } answers the agent directly.
+  function questionCard({ title, text, options = [], target, answered, answer }) {
+    if (answered) return `<div class="q-title">${esc(title)}</div><div class="q-text">${md(text)}</div><div class="q-ans">✓ Answered: ${esc(answer || '')}</div>`;
+    const attr = `data-qkind="${target.kind}" data-qid="${esc(target.id)}"`;
+    return `<div class="q-title">${esc(title)}</div><div class="q-text">${md(text)}</div>
+      ${options.length ? `<div class="q-opts">${options.map((o) => `<button ${attr} data-qtext="${esc(o)}">${esc(o)}</button>`).join('')}</div>` : ''}
+      <form class="q-form" ${attr}><input placeholder="Or type your own answer…" autocomplete="off"><button class="primary small" type="submit">Send</button></form>`;
+  }
+  const questionHtml = (e) => questionCard({ title: 'Question for you', text: e.text, options: e.options, target: { kind: 'chat', id: e.id }, answered: e.answered, answer: e.answer });
   function chatNode(e) {
     const d = document.createElement('div');
     d.className = 'msg ' + e.role;
     d.dataset.id = e.id;
     if (e.role === 'tool') d.textContent = '→ ' + e.text;
     else if (e.role === 'user' || e.role === 'supervisor') d.innerHTML = md(e.text);
+    else if (e.role === 'question') d.innerHTML = questionHtml(e);
     else d.textContent = e.text;
     return d;
   }
@@ -341,7 +357,7 @@
     chat.push(e);
     const visible = nav.view === 'chat' && e.scope === nav.scope && $('#chat');
     if (!visible) {
-      if (e.role === 'supervisor' && e.scope !== 'general') {
+      if ((e.role === 'supervisor' || e.role === 'question') && e.scope !== 'general') {
         unread[e.scope] = (unread[e.scope] || 0) + 1;
         renderTree();
         setHtml($('#pane-tabs'), tabsHtml());
@@ -459,9 +475,18 @@
           <div class="sub"><span class="chip" data-nav="${nav.scope}/${a.taskId === nav.scope ? 'overview' : 'sub/' + a.taskId}">${esc(a.taskId)}${task ? ' · ' + esc(task.title.slice(0, 40)) : ''}</span><span>started ${ago(a.startedAt)} ago</span><span class="chip" id="agent-dur"></span><span class="chip">${esc(a.model || 'default model')}</span><span id="agent-tok"></span>${a.web ? '<span class="chip">web</span>' : ''}</div>
           <div class="activity" id="agent-activity"></div>
         </div>${live ? `<button class="danger" data-stop="${a.id}">Stop agent</button>` : ''}</div>
+      ${a.status === 'waiting' && a.question ? `<div class="msg question agentq">${questionCard({ title: `${a.name} is waiting for an answer`, text: a.question.text, options: a.question.options, target: { kind: 'agent', id: a.id } })}</div>` : ''}
+      ${live ? `<div class="muted msgnote">${esc(a.name)} is running. You can message it directly once it pauses or finishes.</div>` : a.status === 'waiting' ? '' : `<form class="agentmsg" data-agentmsg="${a.id}"><textarea id="agent-msg" rows="1" placeholder="Message ${esc(a.name)} directly: resumes its session (its result still goes to the supervisor)…"></textarea><button class="primary small" type="submit">Send</button></form>`}
       <div class="seg"><button class="${agentTab === 'overview' ? 'on' : ''}" data-tab="overview">Overview</button><button class="${agentTab === 'activity' ? 'on' : ''}" data-tab="activity">Activity <span class="count" id="act-count"></span></button></div>
       ${agentTab === 'overview' ? overview : '<div class="timeline" id="agent-log"></div>'}`;
+    // keep anything you were typing when the page rebuilds (e.g. an agent's checklist just changed)
+    const typedMsg = $('#agent-msg')?.value;
+    const typedAns = $('.agentq .q-form input')?.value;
     const rebuilt = setBody(html);
+    if (rebuilt) {
+      if (typedMsg && $('#agent-msg')) $('#agent-msg').value = typedMsg;
+      if (typedAns && $('.agentq .q-form input')) $('.agentq .q-form input').value = typedAns;
+    }
     if (rebuilt && agentTab === 'activity') fillTimeline();
     // live bits are filled in place so the page itself is not rebuilt on every tick
     setHtml($('#agent-activity'), `${live ? typing : ''}<span class="title">${esc(a.activity || '')}</span>`);
@@ -579,9 +604,16 @@
     const st = t.closest('[data-stop]');
     if (st) return void (await api('POST', `/agents/${st.dataset.stop}/stop`).catch(() => {}));
     if (t.closest('#sup-stop')) return void (await api('POST', `/supervisors/${nav.scope}/stop`).catch(() => {}));
+    const qb = t.closest('button[data-qtext]');
+    if (qb) return void (await answer(qb.dataset.qkind, qb.dataset.qid, qb.dataset.qtext));
     const nv = t.closest('[data-nav]');
     if (nv) return go(nv.dataset.nav);
   });
+  // Answer a question card: via the supervisor's chat question, or straight to the agent.
+  async function answer(kind, id, text) {
+    if (!text?.trim()) return;
+    await api('POST', kind === 'agent' ? `/agents/${id}/message` : `/questions/${id}/answer`, { text }).catch(() => {});
+  }
   $('#new-task').onclick = openNewTask;
   $('#usage-btn').onclick = () => go('usage');
   $('#collapse-all').onclick = () => {
@@ -612,6 +644,20 @@
           go(`${task.id}/chat`); // jump into the new task's supervisor
         })
         .catch(() => {});
+    } else if (e.target.classList?.contains('q-form')) {
+      e.preventDefault();
+      const input = e.target.querySelector('input');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+      await answer(e.target.dataset.qkind, e.target.dataset.qid, text);
+    } else if (e.target.classList?.contains('agentmsg')) {
+      e.preventDefault();
+      const box = e.target.querySelector('textarea');
+      const text = box.value.trim();
+      if (!text) return;
+      box.value = '';
+      await api('POST', `/agents/${e.target.dataset.agentmsg}/message`, { text }).catch(() => (box.value = text));
     } else if (e.target.id === 'composer') {
       e.preventDefault();
       const box = $('#msg');
@@ -659,6 +705,15 @@
       renderAll();
     });
     es.addEventListener('chat', (e) => appendChat(JSON.parse(e.data)));
+    es.addEventListener('chatupdate', (e) => {
+      // e.g. a question card got answered: patch our copy and redraw that one message
+      const { id, patch } = JSON.parse(e.data);
+      const entry = chat.find((x) => x.id === id);
+      if (!entry) return;
+      Object.assign(entry, patch);
+      const node = document.querySelector(`#chat [data-id="${id}"]`);
+      if (node) node.replaceWith(chatNode(entry));
+    });
     es.addEventListener('notice', (e) => toast(JSON.parse(e.data).text, 'info', 8000));
     es.addEventListener('log', (e) => {
       const { agentId, entry } = JSON.parse(e.data);

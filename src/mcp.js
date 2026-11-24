@@ -101,10 +101,22 @@ function supervisorServer(scope) {
     }
   );
 
-  tool('send_to_subagent', 'Send a follow-up instruction to a FINISHED agent (resumes its session).', { agent: z.string(), message: z.string() }, ({ agent, message }) => {
+  tool('send_to_subagent', 'Send a follow-up instruction to a FINISHED agent (resumes its session). To reply to an agent that is WAITING on a question, use answer_agent instead.', { agent: z.string(), message: z.string() }, ({ agent, message }) => {
     const a = m.sendToAgent(agent, message, scope);
     return `${a.id} resumed`;
   });
+
+  tool('answer_agent', 'Answer an agent that is waiting on a question (resumes its session). Use it for routine questions you can decide yourself, or to relay what the user told you. Fails if the agent is no longer waiting (e.g. the user already answered it directly).', { agent: z.string(), answer: z.string() }, ({ agent, answer }) => {
+    const a = m.answerAgent(agent, answer, scope);
+    return `${a.id} resumed with your answer`;
+  });
+
+  tool(
+    'ask_user',
+    'Ask the user a question; it appears as a question card in this task\'s chat. Use it when you need a decision you cannot make from the plan and context (including questions agents raised that you cannot answer). Offer 2-4 short options when possible. After calling it, END YOUR TURN: the answer arrives as your next message.',
+    { question: z.string(), options: z.array(z.string()).optional() },
+    ({ question, options }) => m.askUser(scope, question, options)
+  );
 
   tool('stop_subagent', 'Stop a running agent.', { agent: z.string() }, ({ agent }) => {
     const a = m.stopAgent(agent, { scope });
@@ -126,6 +138,14 @@ function agentServer(agentId) {
       m.setAgentTodos(agentId, items);
       return 'ok';
     })
+  );
+  s.registerTool(
+    'ask',
+    {
+      description: 'Ask a question when you are genuinely BLOCKED (a decision you cannot make from the objective/plan, missing information, an irreversible choice). Open points are not blockers: assume and note it in your report. Offer 2-4 short options if possible. After calling this, STOP: end your turn immediately; you will be resumed with the answer.',
+      inputSchema: { question: z.string(), options: z.array(z.string()).optional() },
+    },
+    wrap(({ question, options }) => m.agentAsk(agentId, question, options))
   );
   s.registerTool('get_my_tasks', { description: 'Read back your own checklist.', inputSchema: {} }, wrap(() => m.getAgent(agentId)?.todos || []));
   return s;

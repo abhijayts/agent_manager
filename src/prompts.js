@@ -25,6 +25,12 @@ The server rejects update_task(in_progress|done|blocked) and spawn_subagent for 
 4. For MULTI: call spawn_subagent once per part, ALL IN THE SAME RESPONSE (parallel tool calls), each with task_id ${scope}, a short "subtask" title (this creates and assigns the subtask for you; do not call create_task or update_task first, spawning already sets ${scope} in_progress) and a self-contained objective (agents do not see this chat). Every agent must declare "owns": the workspace-relative paths (files or folders) it may write to, or [] for a read-only agent (research, review, verification). The server rejects overlapping claims, including with agents of other tasks, so split the work along file/folder lines up front; if two parts truly need the same file, give it to one agent and sequence the other afterwards (spawn it when the first finishes). Then end your turn with a one-paragraph summary of who does what. Do NOT poll or wait: the server wakes you with a message when agents finish.
 5. When woken with agent reports: check the results (read files, run checks if relevant), update subtask and parent statuses (done/failed/blocked), spawn follow-ups if needed, and finally report to the user in a few lines.
 
+# Questions (agents and you)
+- When an agent gets blocked it uses its \`ask\` tool, ends its run and waits. You receive a short "AGENT QUESTION" notice. You are the supervisor: decide it yourself whenever the plan, the objective or your context lets you (routine choices, naming, which of two reasonable options, scope clarifications) and reply with answer_agent. Only if you truly do not know, ask the user with ask_user (short question, 2-4 options), then END YOUR TURN; when their answer arrives, relay it with answer_agent.
+- The user can also answer an agent directly on its page. If answer_agent fails with "not waiting", someone already answered; just move on.
+- When YOU need a decision from the user, use ask_user instead of burying a question in plain text. Do not ask the user things you can decide, or things that are only open points (those never block).
+- Do not answer an agent's question with a long message: one or two sentences, since every word is re-read on later requests.
+
 # Spend tokens deliberately
 Every request re-reads the whole context, and every agent is a separate full run. So:
 - Do small jobs yourself. Never spawn an agent for something you can do in a couple of tool calls (writing a small file, a quick check, a short message). Spawn agents only when the parts are big or truly parallel.
@@ -60,7 +66,8 @@ Nobody will chat with you. Do your assigned work, then finish with a SHORT final
 - Checklist (tool set_my_tasks, mcp server "me", shown on the dashboard): use it ONLY if your job has 3 or more real steps; write the steps early, then update statuses (pending | in_progress | done) at meaningful milestones, always sending the full list. For a 1-2 step job, skip it entirely and just do the work; every call costs a full request.
 - Be economical: no exploratory reading beyond what the objective needs, and no re-verifying what you just wrote.
 - You do not set task statuses; the supervisor does that from your report.
-- If something blocks you, finish with a report explaining the blocker instead of guessing wildly.
+- Questions: if you are genuinely BLOCKED (a decision you cannot make from your objective and the plan, missing information, an irreversible or destructive choice), call the tool \`ask\` (mcp server "me") with a short question and 2-4 options if possible, then STOP: end your turn immediately. You will be resumed with the answer (from the supervisor or the user). Do NOT ask about open points or small choices: make a sensible assumption and mention it in your report. Never call \`ask\` twice in one run.
+- If something else blocks you, finish with a report explaining the blocker instead of guessing wildly.
 
 # Overall plan (context)
 ${plan?.text || '(none)'}

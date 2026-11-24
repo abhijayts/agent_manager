@@ -96,7 +96,7 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(250px
 .s-in_progress, .s-running, .s-starting { --c: var(--info); }
 .s-done { --c: var(--ok); }
 .s-failed, .s-cancelled, .s-stopped { --c: var(--bad); }
-.s-blocked, .s-awaiting_approval { --c: var(--warn); }
+.s-blocked, .s-awaiting_approval, .s-waiting { --c: var(--warn); }
 .s-ready { --c: var(--accent); }
 .s-new { --c: var(--muted); }
 .badge { --k: var(--c, var(--muted)); display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; color: var(--k); background: color-mix(in srgb, var(--k) 14%, transparent); border: 1px solid color-mix(in srgb, var(--k) 32%, transparent); }
@@ -353,3 +353,19 @@ main { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(250px
 .utable .num { text-align: right; font-variant-numeric: tabular-nums; }
 .utable tr.clickable { cursor: pointer; }
 .utable tr.clickable:hover td { background: rgba(255, 255, 255, 0.06); }
+
+/* =====================  QUESTIONS (supervisor ask_user / agent ask)  ===================== */
+.msg.question { align-self: stretch; max-width: 100%; white-space: normal; background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(124, 156, 255, 0.10)); border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 16px; padding: 12px 14px; box-shadow: 0 6px 22px rgba(251, 191, 36, 0.08); }
+.msg.question.enter { animation: rise 0.28s ease both; }
+.q-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1.1px; color: var(--warn); font-weight: 700; margin-bottom: 4px; }
+.q-text { font-size: 14.5px; line-height: 1.5; }
+.q-opts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.q-opts button { border-radius: 999px; padding: 5px 14px; background: rgba(255, 255, 255, 0.07); border-color: var(--border-2); }
+.q-opts button:hover { background: rgba(124, 156, 255, 0.25); border-color: var(--accent); }
+.q-form { display: flex; gap: 8px; margin-top: 10px; }
+.q-form input { border-radius: 999px; padding: 6px 14px; }
+.q-ans { margin-top: 8px; font-size: 12.5px; color: var(--ok); }
+.agentq { margin: 4px 0 12px; }
+.agentmsg { display: flex; gap: 8px; align-items: flex-end; margin: 4px 0 8px; }
+.agentmsg textarea { border-radius: 14px; resize: none; max-height: 120px; }
+.msgnote { font-size: 12.5px; margin: 4px 0 8px; }

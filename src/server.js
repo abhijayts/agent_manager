@@ -41,6 +41,12 @@ api.post('/supervisors/:scope/stop', h((req) => m.stopSupervisor(req.params.scop
 api.post('/agents/:id/stop', h((req) => {
   m.stopAgent(req.params.id);
 }));
+api.post('/agents/:id/message', h((req) => {
+  m.userMessageAgent(req.params.id, req.body.text);
+}));
+api.post('/questions/:id/answer', h((req) => {
+  m.answerQuestion(req.params.id, req.body.text);
+}));
 api.get('/agents/:id/log', h((req) => {
   const a = m.getAgent(req.params.id);
   if (!a) throw new m.UserError('no such agent');
@@ -62,6 +68,8 @@ api.get('/events', (req, res) => {
   const onChat = (entry) => send('chat', entry);
   const onLog = (d) => send('log', d);
   const onNotice = (d) => send('notice', d);
+  const onChatUpdate = (d) => send('chatupdate', d);
+  store.bus.on('chatUpdate', onChatUpdate);
   store.bus.on('changed', onChanged);
   store.bus.on('chat', onChat);
   store.bus.on('log', onLog);
@@ -74,6 +82,7 @@ api.get('/events', (req, res) => {
     store.bus.off('chat', onChat);
     store.bus.off('log', onLog);
     store.bus.off('notice', onNotice);
+    store.bus.off('chatUpdate', onChatUpdate);
   });
 });
 app.use('/api', api);
